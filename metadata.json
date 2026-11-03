@@ -1,0 +1,6 @@
+{
+  "name": "RoboSim AI",
+  "description": "AI-powered synthetic scenario generation and autonomous delivery robot testing platform with interactive 3D campus simulation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
