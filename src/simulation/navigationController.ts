@@ -10,6 +10,7 @@ import {
   AvoidanceHierarchyLevel,
   CampusElevatorConfig,
   CandidatePolicyState,
+  CustomStartPosition,
   DeliveryLocation,
   ElevatorFaultMode,
   ElevatorMachineState,
@@ -29,6 +30,7 @@ import {
   ScenarioConfig,
   SimulationLogEntry,
   SimulationRunState,
+  StartPositionValidationResult,
   Vector2D,
 } from '../types/simulation';
 import {
@@ -83,6 +85,8 @@ export interface SimulationCompletionData {
   destinationName: string;
   originFloor?: number;
   destinationFloor?: number;
+  originCoordinates?: { x: number; z: number; y?: number; floor?: number; headingRad?: number };
+  destinationCoordinates?: { x: number; z: number; y?: number; floor?: number };
   robotHardwareSummary?: string;
   payloadKg?: number;
   status: 'Success' | 'Failed';
@@ -178,6 +182,14 @@ export class AutonomousNavigationController {
   public currentRobotId: string;
   public originOverrideId: string | null = null;
   public destinationOverrideId: string | null = null;
+  public customStartPosition: CustomStartPosition | null = null;
+  public initialStartCoords: {
+    x: number;
+    z: number;
+    y: number;
+    floor: number;
+    headingRad: number;
+  } = { x: -15, z: -20, y: 0, floor: 0, headingRad: 0 };
 
   /**
    * Optional flag to run pre-Part-1 legacy eager-replanning behavior for
@@ -447,6 +459,37 @@ export class AutonomousNavigationController {
   }
 
   public getOriginLocation(): DeliveryLocation {
+    if (this.customStartPosition) {
+      const cPos = this.customStartPosition;
+      const cFloor = cPos.floor ?? 0;
+      const elevs = this.getActiveElevators();
+      let matchedElev: CampusElevatorConfig | undefined;
+      for (const e of elevs) {
+        const inCorridor =
+          Math.abs(cPos.x - e.cabinPos.x) <= 9.5 &&
+          cPos.z >= e.cabinPos.z - 2.4 &&
+          cPos.z <= e.outdoorApproachPos.z + 1.8;
+        if (inCorridor || cFloor > 0) {
+          matchedElev = e;
+          if (inCorridor) break;
+        }
+      }
+      const floorCode = cFloor === 0 ? 'G' : `${cFloor}F`;
+      return {
+        id: 'custom-start-pos',
+        name:
+          cPos.label ||
+          `Custom Start (${cPos.x.toFixed(1)}, ${cPos.z.toFixed(1)}, ${floorCode})`,
+        code: `CUST-${floorCode}`,
+        buildingId: matchedElev?.buildingId || 'outdoor-custom',
+        position: [cPos.x, Number((cFloor * 3.6).toFixed(2)), cPos.z],
+        type: 'delivery',
+        priority: 'Standard',
+        floor: cFloor,
+        isIndoor: Boolean(cFloor > 0 || matchedElev),
+        elevatorId: matchedElev?.id,
+      };
+    }
     const locs = this.getActiveLocations();
     const origId = this.originOverrideId || this.currentScenario.originId;
     return (
@@ -545,7 +588,8 @@ export class AutonomousNavigationController {
     robotId: string,
     destinationOverrideId: string | null = null,
     originOverrideId: string | null = null,
-    environment?: EnvironmentDefinition | null
+    environment?: EnvironmentDefinition | null,
+    customStartPosition?: CustomStartPosition | null
   ): void {
     if (environment !== undefined) {
       this.setEnvironment(environment);
@@ -555,9 +599,323 @@ export class AutonomousNavigationController {
     this.currentRobotId = robotId;
     this.originOverrideId = originOverrideId;
     this.destinationOverrideId = destinationOverrideId;
+    if (customStartPosition !== undefined) {
+      this.customStartPosition = customStartPosition;
+    } else if (originOverrideId !== null) {
+      this.customStartPosition = null;
+    }
     this.pedestrianDistributionOverride = null;
     this.elevatorFaultModeOverride = null;
     this.reset(false);
+  }
+
+  /**
+   * Updates only the active navigation policy and/or candidate Q-table without resetting
+   * the robot's physical transform or clearing a completed/failed/paused simulation state.
+   */
+  public updatePolicyOnly(
+    policy: NavigationPolicyConfig,
+    candidateState?: CandidatePolicyState | null
+  ): void {
+    this.currentPolicy = policy;
+    if (candidateState !== undefined) {
+      this.candidatePolicyState = candidateState;
+    }
+  }
+
+  /**
+   * Validates whether a candidate (x, z, floor) starting position is in a walkable area,
+   * respects the active robot's collision footprint against buildings/barriers/props,
+   * and has a valid collision-free A* route to the active destination.
+   */
+  public validateStartPosition(
+    candidateX: number,
+    candidateZ: number,
+    candidateFloor = 0
+  ): StartPositionValidationResult {
+    setActiveRuntimeEnvironment(this.currentEnvironment);
+    const floorY = Number((candidateFloor * 3.6).toFixed(2));
+    const basePos = {
+      x: Number(candidateX.toFixed(2)),
+      z: Number(candidateZ.toFixed(2)),
+      y: floorY,
+      floor: candidateFloor,
+    };
+
+    const envWidth = this.currentEnvironment?.widthM ?? 80;
+    const envDepth = this.currentEnvironment?.depthM ?? 80;
+    const halfW = Math.min(37, envWidth / 2 - 1.5);
+    const halfD = Math.min(37, envDepth / 2 - 1.5);
+
+    if (Math.abs(candidateX) > halfW || Math.abs(candidateZ) > halfD) {
+      return {
+        valid: false,
+        reason: `Coordinates (${candidateX.toFixed(1)}, ${candidateZ.toFixed(
+          1
+        )}) are outside the navigable environment boundaries (±${halfW.toFixed(
+          0
+        )}m × ±${halfD.toFixed(0)}m).`,
+        position: basePos,
+        routeReachable: false,
+        routeWaypointsCount: 0,
+      };
+    }
+
+    const validFloors =
+      this.currentEnvironment &&
+      Array.isArray(this.currentEnvironment.floors) &&
+      this.currentEnvironment.floors.length > 0
+        ? this.currentEnvironment.floors.map((f) => f.floor)
+        : [0, 1, 2];
+
+    if (!validFloors.includes(candidateFloor)) {
+      return {
+        valid: false,
+        reason: `Floor ${candidateFloor}F does not exist in ${
+          this.currentEnvironment?.name ?? 'the current environment'
+        }.`,
+        position: basePos,
+        routeReachable: false,
+        routeWaypointsCount: 0,
+      };
+    }
+
+    const bot = this.getCurrentRobot();
+    const botRadius = bot.collisionRadiusM ?? ROBOT_COLLISION_RADIUS;
+    const activeElevs = this.getActiveElevators();
+
+    // Check if inside an elevator-equipped building corridor/room
+    let matchedElev: CampusElevatorConfig | null = null;
+    for (const elev of activeElevs) {
+      const inGroundCorridor =
+        Math.abs(candidateX - elev.cabinPos.x) <= 9.5 &&
+        candidateZ >= elev.cabinPos.z - 2.4 &&
+        candidateZ <= elev.outdoorApproachPos.z + 1.8;
+      const dest = elev.destinationRoomPos;
+      const minUpperX = Math.min(elev.cabinPos.x - 8.5, dest.x) - 2.2;
+      const maxUpperX = Math.max(elev.cabinPos.x + 8.5, dest.x) + 2.2;
+      const minUpperZ = Math.min(elev.cabinPos.z, elev.lobbyPos.z, dest.z) - 2.4;
+      const maxUpperZ = Math.max(elev.cabinPos.z, elev.lobbyPos.z, dest.z) + 2.4;
+      const inUpperCorridor =
+        candidateX >= minUpperX &&
+        candidateX <= maxUpperX &&
+        candidateZ >= minUpperZ &&
+        candidateZ <= maxUpperZ;
+
+      if (
+        (candidateFloor === 0 && inGroundCorridor) ||
+        (candidateFloor > 0 && inUpperCorridor)
+      ) {
+        matchedElev = elev;
+        break;
+      }
+    }
+
+    if (candidateFloor > 0 && !matchedElev) {
+      return {
+        valid: false,
+        reason: `Upper-floor position (${candidateX.toFixed(
+          1
+        )}, ${candidateZ.toFixed(
+          1
+        )}) on Floor ${candidateFloor}F is outside valid indoor building floor slabs and elevator corridors.`,
+        position: basePos,
+        routeReachable: false,
+        routeWaypointsCount: 0,
+      };
+    }
+
+    // Check physical collision footprint (buildings, walls, props, active construction barriers)
+    const hit = checkSweptRobotCollision(
+      basePos,
+      basePos,
+      botRadius,
+      this.currentScenario.activeConstructionZones,
+      [],
+      matchedElev,
+      true
+    );
+
+    if (hit && hit.collided) {
+      return {
+        valid: false,
+        reason: `Invalid Starting Position (${candidateX.toFixed(
+          1
+        )}, ${candidateZ.toFixed(1)}): Overlaps ${hit.obstacleType} "${
+          hit.obstacleName
+        }" within ${bot.name} collision footprint (r=${botRadius.toFixed(2)}m).`,
+        position: basePos,
+        routeReachable: false,
+        routeWaypointsCount: 0,
+      };
+    }
+
+    // Check navigation grid walkability on Ground Floor (0F) when outdoors
+    const grid =
+      this.cachedStaticGrid.length > 0
+        ? this.cachedStaticGrid
+        : buildNavigationGrid(
+            this.currentScenario.activeConstructionZones,
+            this.currentPolicy.constructionAvoidanceWeight,
+            []
+          );
+    const { gx, gz } = worldToGridCoords(candidateX, candidateZ);
+    const cell = grid[gx]?.[gz];
+
+    if (candidateFloor === 0 && !matchedElev) {
+      if (!cell || !cell.walkable) {
+        const blockDetail =
+          cell?.obstacleName ||
+          (cell?.blockReason === 'off-road'
+            ? 'off-pathway grass/terrain (must be on a navigable pathway or corridor)'
+            : cell?.blockReason || 'non-walkable cell');
+        return {
+          valid: false,
+          reason: `Invalid Starting Position (${candidateX.toFixed(
+            1
+          )}, ${candidateZ.toFixed(1)}): Location is blocked by ${blockDetail}.`,
+          position: basePos,
+          routeReachable: false,
+          routeWaypointsCount: 0,
+        };
+      }
+    }
+
+    // Verify a valid A* route exists to the active destination
+    const targetLoc = this.getTargetLocation();
+    const tFloor =
+      this.destinationOverrideId !== null
+        ? targetLoc.floor ?? 0
+        : targetLoc.floor !== undefined && targetLoc.floor > 0
+        ? targetLoc.floor
+        : this.currentScenario.destinationFloor ??
+          (this.currentScenario.requiresElevator ? 2 : targetLoc.floor ?? 0);
+
+    let routeDiag: PathfindingDiagnosticsResult;
+    if (candidateFloor !== tFloor && activeElevs.length > 0) {
+      const targetElev =
+        (targetLoc.elevatorId
+          ? activeElevs.find((e) => e.id === targetLoc.elevatorId)
+          : undefined) ??
+        matchedElev ??
+        activeElevs.find((e) => e.isPrimary) ??
+        activeElevs[0];
+      routeDiag = this.computeMultiFloorApproachRoute(basePos, targetElev, []);
+    } else if (
+      candidateFloor === tFloor &&
+      (matchedElev || targetLoc.isIndoor) &&
+      activeElevs.length > 0
+    ) {
+      const bldgElev =
+        matchedElev ??
+        activeElevs.find((e) => e.buildingId === targetLoc.buildingId) ??
+        activeElevs[0];
+      if (candidateFloor > 0 || (matchedElev && targetLoc.isIndoor)) {
+        const wps = buildIndoorElevatorRouteWaypoints(
+          bldgElev,
+          'same-floor-indoor',
+          candidateFloor,
+          {
+            x: targetLoc.position[0],
+            z: targetLoc.position[2],
+            y: floorY,
+            floor: tFloor,
+          },
+          basePos
+        );
+        routeDiag = {
+          path: wps,
+          reachable: wps.length >= 2,
+          detourActive: false,
+          blockedZonesOnDirectPath: [],
+          failureReason: wps.length >= 2 ? null : 'No indoor corridor path found.',
+        };
+      } else if (!matchedElev && targetLoc.isIndoor) {
+        routeDiag = computeAStarPathWithDiagnostics(
+          basePos,
+          bldgElev.outdoorApproachPos,
+          this.currentScenario.activeConstructionZones,
+          this.currentPolicy.constructionAvoidanceWeight,
+          []
+        );
+      } else {
+        routeDiag = computeAStarPathWithDiagnostics(
+          bldgElev.outdoorApproachPos,
+          { x: targetLoc.position[0], z: targetLoc.position[2], y: 0, floor: 0 },
+          this.currentScenario.activeConstructionZones,
+          this.currentPolicy.constructionAvoidanceWeight,
+          []
+        );
+      }
+    } else {
+      routeDiag = computeAStarPathWithDiagnostics(
+        basePos,
+        { x: targetLoc.position[0], z: targetLoc.position[2], y: 0, floor: 0 },
+        this.currentScenario.activeConstructionZones,
+        this.currentPolicy.constructionAvoidanceWeight,
+        []
+      );
+    }
+
+    if (!routeDiag.reachable || routeDiag.path.length < 2) {
+      return {
+        valid: false,
+        reason:
+          routeDiag.failureReason ||
+          `Invalid Starting Position (${candidateX.toFixed(
+            1
+          )}, ${candidateZ.toFixed(
+            1
+          )}): No reachable A* route to destination "${targetLoc.name}".`,
+        position: basePos,
+        routeReachable: false,
+        routeWaypointsCount: 0,
+      };
+    }
+
+    return {
+      valid: true,
+      reason: null,
+      position: basePos,
+      routeReachable: true,
+      routeWaypointsCount: routeDiag.path.length,
+    };
+  }
+
+  public setCustomStartPosition(
+    customPos: CustomStartPosition | null
+  ): StartPositionValidationResult | null {
+    if (!customPos) {
+      this.customStartPosition = null;
+      this.reset(true);
+      return null;
+    }
+
+    const validation = this.validateStartPosition(
+      customPos.x,
+      customPos.z,
+      customPos.floor ?? 0
+    );
+
+    if (!validation.valid) {
+      // Do NOT overwrite previous valid start position or silently fall back to hardcoded origin
+      this.callbacks.onLogEvent?.(
+        'warn',
+        validation.reason || 'Rejected invalid custom starting position.'
+      );
+      return validation;
+    }
+
+    this.customStartPosition = {
+      ...customPos,
+      x: validation.position.x,
+      z: validation.position.z,
+      y: validation.position.y,
+      floor: validation.position.floor,
+    };
+    this.originOverrideId = null;
+    this.reset(true);
+    return validation;
   }
 
   public setCustomPedestrianAgents(agents: PedestrianSimAgent[]): void {
@@ -686,6 +1044,13 @@ export class AutonomousNavigationController {
       currentDestination: destinationLabel,
       originFloor: this.originFloor,
       destinationFloor: this.targetFloor,
+      originCoordinates: { ...this.initialStartCoords },
+      destinationCoordinates: {
+        x: Number(target.position[0].toFixed(1)),
+        z: Number(target.position[2].toFixed(1)),
+        y: Number(((this.targetFloor ?? 0) * 3.6).toFixed(2)),
+        floor: this.targetFloor,
+      },
       batteryLevelPct: Number(this.batteryPct.toFixed(1)),
       currentSpeedMps: Number(this.currentSpeedMps.toFixed(2)),
       targetSpeedMps: Number(this.targetSpeedMps.toFixed(2)),
@@ -1098,11 +1463,24 @@ export class AutonomousNavigationController {
       : [];
     this.currentWaypointIdx = Math.min(1, Math.max(0, this.waypoints.length - 1));
 
-    if (this.waypoints.length > 1) {
+    if (
+      this.customStartPosition &&
+      typeof this.customStartPosition.headingRad === 'number'
+    ) {
+      this.robotHeading = this.customStartPosition.headingRad;
+    } else if (this.waypoints.length > 1) {
       const dx = this.waypoints[1].x - this.robotPos.x;
       const dz = this.waypoints[1].z - this.robotPos.z;
       this.robotHeading = Math.atan2(dx, dz);
     }
+
+    this.initialStartCoords = {
+      x: Number(this.robotPos.x.toFixed(2)),
+      z: Number(this.robotPos.z.toFixed(2)),
+      y: Number(this.robotAltitudeY.toFixed(2)),
+      floor: this.originFloor,
+      headingRad: Number(this.robotHeading.toFixed(2)),
+    };
 
     this.distanceRemainingM = calculatePathDistance(this.waypoints);
     this.robotOpState = 'Standby';
@@ -3153,6 +3531,13 @@ export class AutonomousNavigationController {
           finalGoalCoords.z - this.robotPos.z
         );
         if (distToDest <= 1.2) {
+          // Preserve the robot's final physical position & heading at the destination
+          this.robotPos = {
+            x: finalGoalCoords.x,
+            z: finalGoalCoords.z,
+            y: finalGoalCoords.y ?? this.robotAltitudeY,
+            floor: finalGoalCoords.floor ?? this.currentFloor,
+          };
           this.runState = 'completed';
           this.currentSpeedMps = 0;
           this.distanceRemainingM = 0;
@@ -3225,10 +3610,11 @@ export class AutonomousNavigationController {
           (activeElev && (activeElev.doorOpenProgress ?? 0) >= 0.45)
       );
 
+      const bot = this.getCurrentRobot();
       const hit = checkSweptRobotCollision(
         this.robotPos,
         candidatePos,
-        ROBOT_COLLISION_RADIUS,
+        bot.collisionRadiusM ?? ROBOT_COLLISION_RADIUS,
         this.currentScenario.activeConstructionZones,
         pedCircles,
         activeElevCfg,
@@ -3605,6 +3991,13 @@ export class AutonomousNavigationController {
           : target.name,
       originFloor: this.originFloor,
       destinationFloor: this.targetFloor,
+      originCoordinates: { ...this.initialStartCoords },
+      destinationCoordinates: {
+        x: Number(target.position[0].toFixed(1)),
+        z: Number(target.position[2].toFixed(1)),
+        y: Number(((this.targetFloor ?? 0) * 3.6).toFixed(2)),
+        floor: this.targetFloor,
+      },
       safetyInterventionCount: this.safetyInterventionCount,
       unnecessaryReplanCount: this.unnecessaryReplanCount,
       deadlockCount:

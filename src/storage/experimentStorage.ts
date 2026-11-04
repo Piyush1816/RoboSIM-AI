@@ -43,6 +43,7 @@ export const STORAGE_KEYS = {
   SELECTED_ROBOT_ID: 'robosim_ai_selected_robot_id_v1',
   ENVIRONMENTS: 'robosim_ai_custom_environments_v1',
   SELECTED_ENVIRONMENT_ID: 'robosim_ai_selected_environment_id_v1',
+  SELECTED_POLICY_ID: 'robosim_ai_selected_policy_id_v1',
 };
 
 let activeCloudUid: string | null = null;
@@ -629,22 +630,78 @@ export function saveCustomScenariosBatch(
 
 export function loadPolicies(): NavigationPolicyConfig[] {
   try {
-    if (typeof localStorage === 'undefined') return NAVIGATION_POLICIES;
+    const candidateState = loadCandidatePolicyState();
+    const activePolId =
+      typeof localStorage !== 'undefined'
+        ? localStorage.getItem(STORAGE_KEYS.SELECTED_POLICY_ID) || 'pol-hybrid-safe'
+        : 'pol-hybrid-safe';
+
+    const syncCandidateMetadata = (list: NavigationPolicyConfig[]): NavigationPolicyConfig[] => {
+      const meanReward =
+        candidateState.trainingMetricsSummary?.meanReward ??
+        (candidateState.trainingHistory.length > 0
+          ? Number(
+              (
+                candidateState.trainingHistory.reduce((acc, ep) => acc + ep.totalReward, 0) /
+                candidateState.trainingHistory.length
+              ).toFixed(1)
+            )
+          : undefined);
+
+      return list.map((p) => {
+        if (p.id === 'pol-candidate-rl') {
+          return {
+            ...p,
+            name: candidateState.name || p.name,
+            version: candidateState.version || p.version,
+            isCandidatePolicy: true,
+            createdAt: candidateState.createdAt ?? candidateState.lastTrainedAt ?? p.createdAt,
+            activatedAt: candidateState.activatedAt ?? p.activatedAt,
+            isActive: activePolId === 'pol-candidate-rl',
+            trainedRobotId: candidateState.trainedRobotId ?? p.trainedRobotId,
+            trainedRobotName: candidateState.trainedRobotName ?? p.trainedRobotName,
+            trainedEnvironmentId: candidateState.trainedEnvironmentId ?? p.trainedEnvironmentId,
+            trainedEnvironmentName:
+              candidateState.trainedEnvironmentName ?? p.trainedEnvironmentName,
+            totalEpisodesTrained: candidateState.totalEpisodesTrained ?? p.totalEpisodesTrained,
+            meanEpisodeReward: meanReward ?? p.meanEpisodeReward,
+          };
+        }
+        return {
+          ...p,
+          isActive: p.id === activePolId,
+        };
+      });
+    };
+
+    if (typeof localStorage === 'undefined') {
+      return syncCandidateMetadata(NAVIGATION_POLICIES);
+    }
     const raw = localStorage.getItem(STORAGE_KEYS.POLICIES);
-    if (!raw) return NAVIGATION_POLICIES;
+    if (!raw) return syncCandidateMetadata(NAVIGATION_POLICIES);
     const parsed: NavigationPolicyConfig[] = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return NAVIGATION_POLICIES;
-    // Ensure Candidate Q-Learning Policy is always present in the list
-    const hasCandidate = parsed.some((p) => p.id === 'pol-candidate-rl');
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return syncCandidateMetadata(NAVIGATION_POLICIES);
+    }
+    // Deduplicate by policy ID while ensuring Candidate Q-Learning Policy is always present
+    const seen = new Set<string>();
+    const deduped: NavigationPolicyConfig[] = [];
+    for (const item of parsed) {
+      if (item && item.id && !seen.has(item.id)) {
+        seen.add(item.id);
+        deduped.push(item);
+      }
+    }
+    const hasCandidate = deduped.some((p) => p.id === 'pol-candidate-rl');
     if (!hasCandidate) {
       const candDefault = NAVIGATION_POLICIES.find(
         (p) => p.id === 'pol-candidate-rl'
       );
       if (candDefault) {
-        return [parsed[0], candDefault, ...parsed.slice(1)];
+        return syncCandidateMetadata([deduped[0], candDefault, ...deduped.slice(1)]);
       }
     }
-    return parsed;
+    return syncCandidateMetadata(deduped);
   } catch {
     return NAVIGATION_POLICIES;
   }
@@ -662,6 +719,66 @@ export function savePolicies(policies: NavigationPolicyConfig[]): void {
   }
 }
 
+export function loadSelectedPolicyId(): string {
+  try {
+    if (typeof localStorage === 'undefined') return 'pol-hybrid-safe';
+    const saved = localStorage.getItem(STORAGE_KEYS.SELECTED_POLICY_ID);
+    const rawPolicies = localStorage.getItem(STORAGE_KEYS.POLICIES);
+    const list: NavigationPolicyConfig[] = rawPolicies
+      ? JSON.parse(rawPolicies)
+      : NAVIGATION_POLICIES;
+    const validIds = new Set(
+      (Array.isArray(list) && list.length > 0 ? list : NAVIGATION_POLICIES).map(
+        (p) => p.id
+      )
+    );
+    validIds.add('pol-candidate-rl');
+    validIds.add('pol-hybrid-safe');
+    if (saved && validIds.has(saved)) {
+      return saved;
+    }
+    return 'pol-hybrid-safe';
+  } catch {
+    return 'pol-hybrid-safe';
+  }
+}
+
+export function saveSelectedPolicyId(policyId: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STORAGE_KEYS.SELECTED_POLICY_ID, policyId);
+      const candRaw = localStorage.getItem(STORAGE_KEYS.CANDIDATE_POLICY);
+      if (candRaw) {
+        const parsedCand = JSON.parse(candRaw) as CandidatePolicyState;
+        if (parsedCand && typeof parsedCand === 'object') {
+          const updatedCand: CandidatePolicyState = {
+            ...parsedCand,
+            isActive: policyId === 'pol-candidate-rl',
+            activatedAt:
+              policyId === 'pol-candidate-rl'
+                ? parsedCand.activatedAt || new Date().toISOString()
+                : parsedCand.activatedAt,
+          };
+          localStorage.setItem(
+            STORAGE_KEYS.CANDIDATE_POLICY,
+            JSON.stringify(updatedCand)
+          );
+          triggerCloudSync('candidatePolicy', updatedCand);
+        }
+      }
+      triggerCloudSync('preferences', {
+        selectedRobotId: loadSelectedRobotId(),
+        selectedEnvironmentId: loadSelectedEnvironmentId(),
+        selectedPolicyId: policyId,
+        demoPreviewEnabled: loadDemoPreviewPreference(),
+      });
+    }
+    notifyStoreSubscribers();
+  } catch {
+    // ignore
+  }
+}
+
 export function loadCandidatePolicyState(): CandidatePolicyState {
   try {
     if (typeof localStorage === 'undefined') {
@@ -673,7 +790,14 @@ export function loadCandidatePolicyState(): CandidatePolicyState {
     if (!parsed || typeof parsed !== 'object' || !parsed.qTable) {
       return createInitialCandidatePolicyState();
     }
-    return parsed;
+    const activePolId = localStorage.getItem(STORAGE_KEYS.SELECTED_POLICY_ID);
+    return {
+      ...parsed,
+      isActive:
+        activePolId !== null
+          ? activePolId === 'pol-candidate-rl'
+          : Boolean(parsed.isActive),
+    };
   } catch {
     return createInitialCandidatePolicyState();
   }
@@ -688,6 +812,180 @@ export function saveCandidatePolicyState(state: CandidatePolicyState): void {
     notifyStoreSubscribers();
   } catch {
     // ignore
+  }
+}
+
+export function validateAndSaveAndActivateCandidatePolicy(
+  candidateInput?: CandidatePolicyState
+): {
+  success: boolean;
+  error?: string;
+  candidateState: CandidatePolicyState;
+  policies: NavigationPolicyConfig[];
+  activePolicyId: string;
+} {
+  const currentCandidate = candidateInput ?? loadCandidatePolicyState();
+  const currentPolicies = loadPolicies();
+
+  if (!currentCandidate || typeof currentCandidate !== 'object') {
+    return {
+      success: false,
+      error: 'Candidate policy state does not exist.',
+      candidateState: createInitialCandidatePolicyState(),
+      policies: currentPolicies,
+      activePolicyId: loadSelectedPolicyId(),
+    };
+  }
+
+  const qTableKeys =
+    currentCandidate.qTable && typeof currentCandidate.qTable === 'object'
+      ? Object.keys(currentCandidate.qTable)
+      : [];
+
+  if (
+    !currentCandidate.isTrained ||
+    currentCandidate.totalEpisodesTrained <= 0 ||
+    qTableKeys.length === 0
+  ) {
+    return {
+      success: false,
+      error:
+        'Cannot save & activate an untrained candidate policy: learned Q-table is empty (0 states learned). Run Q-Learning training episodes first.',
+      candidateState: currentCandidate,
+      policies: currentPolicies,
+      activePolicyId: loadSelectedPolicyId(),
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const history = Array.isArray(currentCandidate.trainingHistory)
+    ? currentCandidate.trainingHistory
+    : [];
+  const episodesCompleted =
+    history.length > 0 ? history.length : currentCandidate.totalEpisodesTrained;
+  const successCount = history.filter((ep) => ep.status === 'Success').length;
+  const failureCount = history.length - successCount;
+  const successRatePct =
+    history.length > 0
+      ? Number(((successCount / history.length) * 100).toFixed(1))
+      : 100;
+  const meanReward =
+    history.length > 0
+      ? Number(
+          (
+            history.reduce((acc, ep) => acc + ep.totalReward, 0) / history.length
+          ).toFixed(1)
+        )
+      : 0;
+  const safetyInterventions = history.reduce(
+    (acc, ep) => acc + (ep.safetyInterventionCount ?? 0),
+    0
+  );
+
+  const enrichedCandidate: CandidatePolicyState = {
+    ...currentCandidate,
+    id: 'pol-candidate-rl',
+    name: currentCandidate.name || 'Candidate Q-Learning Policy',
+    createdAt: currentCandidate.createdAt || currentCandidate.lastTrainedAt || nowIso,
+    lastTrainedAt: currentCandidate.lastTrainedAt || nowIso,
+    activatedAt: nowIso,
+    isActive: true,
+    trainingMetricsSummary: {
+      episodesCompleted,
+      successCount,
+      failureCount,
+      successRatePct,
+      meanReward,
+      safetyInterventions,
+      learnedStatesCount: qTableKeys.length,
+    },
+  };
+
+  const updatedPolicies = currentPolicies.map((pol) => {
+    if (pol.id === 'pol-candidate-rl') {
+      return {
+        ...pol,
+        name: enrichedCandidate.name,
+        version: enrichedCandidate.version,
+        isCandidatePolicy: true,
+        isActive: true,
+        createdAt: enrichedCandidate.createdAt ?? nowIso,
+        activatedAt: nowIso,
+        trainedRobotId: enrichedCandidate.trainedRobotId,
+        trainedRobotName: enrichedCandidate.trainedRobotName,
+        trainedEnvironmentId: enrichedCandidate.trainedEnvironmentId,
+        trainedEnvironmentName: enrichedCandidate.trainedEnvironmentName,
+        totalEpisodesTrained: enrichedCandidate.totalEpisodesTrained,
+        meanEpisodeReward: meanReward,
+        description: `Trained Tabular Q-Learning policy (${enrichedCandidate.version}) with ${qTableKeys.length} learned states across ${enrichedCandidate.totalEpisodesTrained} episodes (${successRatePct}% success, mean reward ${meanReward > 0 ? '+' : ''}${meanReward}). Enforces hard collision safety layer.`,
+      };
+    }
+    return {
+      ...pol,
+      isActive: false,
+    };
+  });
+
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(
+        STORAGE_KEYS.CANDIDATE_POLICY,
+        JSON.stringify(enrichedCandidate)
+      );
+      localStorage.setItem(
+        STORAGE_KEYS.POLICIES,
+        JSON.stringify(updatedPolicies)
+      );
+      localStorage.setItem(STORAGE_KEYS.SELECTED_POLICY_ID, 'pol-candidate-rl');
+
+      // Verify persistence read-back
+      const verifyRaw = localStorage.getItem(STORAGE_KEYS.CANDIDATE_POLICY);
+      const verifyParsed = verifyRaw
+        ? (JSON.parse(verifyRaw) as CandidatePolicyState)
+        : null;
+      if (
+        !verifyParsed ||
+        !verifyParsed.qTable ||
+        Object.keys(verifyParsed.qTable).length === 0
+      ) {
+        return {
+          success: false,
+          error: 'Failed to verify Q-table persistence in browser storage.',
+          candidateState: currentCandidate,
+          policies: currentPolicies,
+          activePolicyId: loadSelectedPolicyId(),
+        };
+      }
+
+      triggerCloudSync('candidatePolicy', enrichedCandidate);
+      triggerCloudSync('policies', updatedPolicies);
+      triggerCloudSync('preferences', {
+        selectedRobotId: loadSelectedRobotId(),
+        selectedEnvironmentId: loadSelectedEnvironmentId(),
+        selectedPolicyId: 'pol-candidate-rl',
+        demoPreviewEnabled: loadDemoPreviewPreference(),
+      });
+    }
+
+    notifyStoreSubscribers();
+
+    return {
+      success: true,
+      candidateState: enrichedCandidate,
+      policies: updatedPolicies,
+      activePolicyId: 'pol-candidate-rl',
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : 'Storage error while saving candidate policy.',
+      candidateState: currentCandidate,
+      policies: currentPolicies,
+      activePolicyId: loadSelectedPolicyId(),
+    };
   }
 }
 
@@ -1126,6 +1424,18 @@ export async function hydrateAndMigrateUserWorkspace(uid: string): Promise<{
     localStorage.setItem(
       STORAGE_KEYS.SELECTED_ENVIRONMENT_ID,
       cloudPrefs.selectedEnvironmentId
+    );
+  }
+  const cloudPrefsWithPol = cloudData.preferences as
+    | { selectedPolicyId?: string }
+    | undefined;
+  if (
+    cloudPrefsWithPol?.selectedPolicyId &&
+    !localStorage.getItem(STORAGE_KEYS.SELECTED_POLICY_ID)
+  ) {
+    localStorage.setItem(
+      STORAGE_KEYS.SELECTED_POLICY_ID,
+      cloudPrefsWithPol.selectedPolicyId
     );
   }
 

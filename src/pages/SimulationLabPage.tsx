@@ -34,6 +34,7 @@ import {
 } from '../three/CampusSceneManager';
 import {
   CameraPresetId,
+  CustomStartPosition,
   ElevatorFaultMode,
   LiveTelemetry,
   NavigationPolicyConfig,
@@ -42,6 +43,7 @@ import {
   PredictionHorizonSec,
   ScenarioConfig,
   SimulationLogEntry,
+  StartPositionValidationResult,
 } from '../types/simulation';
 
 interface SimulationLabPageProps {
@@ -101,6 +103,18 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
   const [cameraPreset, setCameraPreset] = useState<CameraPresetId>('isometric');
   const [destinationOverrideId, setDestinationOverrideId] = useState<string>('');
   const [originOverrideId, setOriginOverrideId] = useState<string>('');
+  const [customStartPosition, setCustomStartPosition] =
+    useState<CustomStartPosition | null>(null);
+  const [isPlacingStartOnMap, setIsPlacingStartOnMap] = useState<boolean>(false);
+  const [placementFloor, setPlacementFloor] = useState<number>(0);
+  const [showCustomCoordInput, setShowCustomCoordInput] =
+    useState<boolean>(false);
+  const [customCoordX, setCustomCoordX] = useState<string>('-15.0');
+  const [customCoordZ, setCustomCoordZ] = useState<string>('-12.0');
+  const [startPlacementFeedback, setStartPlacementFeedback] = useState<{
+    valid: boolean;
+    message: string;
+  } | null>(null);
   const [activeElevatorCaseId, setActiveElevatorCaseId] = useState<string>('');
   const [diagnosticStatuses, setDiagnosticStatuses] = useState<
     Record<string, { status: DiagnosticStatus; summary?: string }>
@@ -284,6 +298,13 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
       activeEnvironment
     );
     sceneManagerRef.current = manager;
+    const existingCustomStart = manager.getCustomStartPosition();
+    if (existingCustomStart) {
+      setCustomStartPosition(existingCustomStart);
+      setCustomCoordX(String(existingCustomStart.x));
+      setCustomCoordZ(String(existingCustomStart.z));
+      setPlacementFloor(existingCustomStart.floor ?? 0);
+    }
 
     const handleResize = () => manager.resize();
     window.addEventListener('resize', handleResize);
@@ -306,6 +327,9 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
       }
       if (e.key.toLowerCase() === 'h') {
         setDockCollapsed((prev) => !prev);
+      } else if (e.key === 'Escape') {
+        setIsPlacingStartOnMap(false);
+        manager.setStartPlacementMode(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -320,10 +344,24 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Reset any manual overrides and sync scenario defaults whenever the active scenario or environment changes
+  const prevScenEnvRef = useRef<string>(
+    `${selectedScenarioId}|${selectedEnvironmentId}`
+  );
+
+  // Reset manual overrides only when the user actually switches scenario or environment ID
   useEffect(() => {
+    const nextKey = `${selectedScenarioId}|${selectedEnvironmentId}`;
+    if (prevScenEnvRef.current === nextKey) {
+      return;
+    }
+    prevScenEnvRef.current = nextKey;
+
     setDestinationOverrideId('');
     setOriginOverrideId('');
+    setCustomStartPosition(null);
+    setIsPlacingStartOnMap(false);
+    setStartPlacementFeedback(null);
+    sceneManagerRef.current?.setStartPlacementMode(false);
     setActiveElevatorCaseId('');
     setPredictionHorizon(activeScenario.predictionHorizonSec ?? 2);
     setPedDist(
@@ -361,7 +399,7 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
     });
   }, [selectedScenarioId, activeScenario, selectedEnvironmentId]);
 
-  // Sync configuration changes without re-creating WebGLRenderer
+  // Sync configuration changes without re-creating WebGLRenderer or resetting a completed run
   useEffect(() => {
     if (!sceneManagerRef.current) return;
     const effectiveScenario: ScenarioConfig = {
@@ -375,7 +413,8 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
       selectedRobotId,
       destinationOverrideId || null,
       originOverrideId || null,
-      activeEnvironment
+      activeEnvironment,
+      customStartPosition
     );
   }, [
     activeScenario,
@@ -383,9 +422,116 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
     selectedRobotId,
     destinationOverrideId,
     originOverrideId,
+    customStartPosition,
     elevatorFaultMode,
     activeEnvironment,
   ]);
+
+  const handleToggle3DStartPlacement = () => {
+    if (!sceneManagerRef.current) return;
+    const nextMode = !isPlacingStartOnMap;
+    setIsPlacingStartOnMap(nextMode);
+    setStartPlacementFeedback(null);
+
+    if (nextMode) {
+      sceneManagerRef.current.setStartPlacementMode(
+        true,
+        placementFloor,
+        (validation: StartPositionValidationResult) => {
+          if (validation.valid) {
+            const floorCode =
+              validation.position.floor === 0
+                ? 'G'
+                : `${validation.position.floor}F`;
+            const placedPos: CustomStartPosition = {
+              x: validation.position.x,
+              z: validation.position.z,
+              y: validation.position.y,
+              floor: validation.position.floor,
+              label: `3D Map Start (${validation.position.x.toFixed(
+                1
+              )}, ${validation.position.z.toFixed(1)}, ${floorCode})`,
+            };
+            setCustomStartPosition(placedPos);
+            setOriginOverrideId('');
+            setCustomCoordX(String(validation.position.x));
+            setCustomCoordZ(String(validation.position.z));
+            setIsPlacingStartOnMap(false);
+            setStartPlacementFeedback({
+              valid: true,
+              message: `Starting position set to (${validation.position.x.toFixed(
+                1
+              )}, ${validation.position.z.toFixed(
+                1
+              )}) on Floor ${floorCode} — Validated walkable with ${
+                validation.routeWaypointsCount
+              } A* route waypoints.`,
+            });
+          } else {
+            setStartPlacementFeedback({
+              valid: false,
+              message:
+                validation.reason ||
+                'Rejected invalid starting position. Previous valid starting position preserved.',
+            });
+          }
+        }
+      );
+    } else {
+      sceneManagerRef.current.setStartPlacementMode(false);
+    }
+  };
+
+  const handleApplyCustomCoordinates = () => {
+    if (!sceneManagerRef.current) return;
+    const parsedX = Number(customCoordX);
+    const parsedZ = Number(customCoordZ);
+    if (Number.isNaN(parsedX) || Number.isNaN(parsedZ)) {
+      setStartPlacementFeedback({
+        valid: false,
+        message: 'Invalid coordinates: X and Z must be valid numbers.',
+      });
+      return;
+    }
+    const floorCode = placementFloor === 0 ? 'G' : `${placementFloor}F`;
+    const candidate: CustomStartPosition = {
+      x: parsedX,
+      z: parsedZ,
+      floor: placementFloor,
+      label: `Custom Start (${parsedX.toFixed(1)}, ${parsedZ.toFixed(
+        1
+      )}, ${floorCode})`,
+    };
+    const validation = sceneManagerRef.current.setCustomStartPosition(candidate);
+    if (validation && validation.valid) {
+      setCustomStartPosition({
+        ...candidate,
+        x: validation.position.x,
+        z: validation.position.z,
+        y: validation.position.y,
+      });
+      setOriginOverrideId('');
+      setIsPlacingStartOnMap(false);
+      sceneManagerRef.current.setStartPlacementMode(false);
+      setStartPlacementFeedback({
+        valid: true,
+        message: `Starting position set to (${validation.position.x.toFixed(
+          1
+        )}, ${validation.position.z.toFixed(
+          1
+        )}) on Floor ${floorCode} — Validated walkable (${
+          validation.routeWaypointsCount
+        } A* route nodes).`,
+      });
+    } else if (validation) {
+      setStartPlacementFeedback({
+        valid: false,
+        message:
+          validation.reason ||
+          'Invalid starting position rejected. Robot remains at previous valid starting position.',
+      });
+    }
+  };
 
   const handleReturnToNormalOperation = () => {
     setActiveElevatorCaseId('');
@@ -637,12 +783,71 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
             </div>
           </div>
 
+          {/* Interactive 3D Start Placement Mode Banner & Validation Feedback */}
+          {(isPlacingStartOnMap || startPlacementFeedback) && (
+            <div className="flex flex-wrap items-center gap-2">
+              {isPlacingStartOnMap && (
+                <div className="bg-cyan-950/95 border border-cyan-400/70 rounded-lg px-3 py-1.5 pointer-events-auto flex flex-wrap items-center gap-2.5 text-xs text-cyan-100 shadow-lg">
+                  <Crosshair className="w-4 h-4 text-cyan-400 animate-pulse shrink-0" />
+                  <span>
+                    <strong>3D Start Placement Mode Active ({placementFloor === 0 ? 'Ground 0F' : `Floor ${placementFloor}F`}):</strong>{' '}
+                    Click any walkable pathway or corridor in the 3D scene to place the robot&apos;s starting position. (Green ring = valid & reachable; Red ring = blocked/obstacle).
+                  </span>
+                  <button
+                    onClick={handleToggle3DStartPlacement}
+                    className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-semibold cursor-pointer"
+                  >
+                    Cancel (Esc)
+                  </button>
+                </div>
+              )}
+
+              {startPlacementFeedback && (
+                <div
+                  className={`rounded-lg px-3 py-1.5 pointer-events-auto flex items-center justify-between gap-2.5 text-xs shadow-lg border ${
+                    startPlacementFeedback.valid
+                      ? 'bg-emerald-950/95 border-emerald-500/60 text-emerald-200'
+                      : 'bg-rose-950/95 border-rose-500/60 text-rose-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {startPlacementFeedback.valid ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    )}
+                    <span>{startPlacementFeedback.message}</span>
+                  </div>
+                  <button
+                    onClick={() => setStartPlacementFeedback(null)}
+                    className="underline text-[11px] opacity-80 hover:opacity-100 cursor-pointer shrink-0"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Alerts / Diagnostic Mode Banner */}
           {(activeElevatorCaseId ||
+            telemetry.simulationState === 'completed' ||
             telemetry.pathBlockedReason ||
             telemetry.detourActive ||
             telemetry.elevatorAssistanceRequested) && (
             <div className="flex flex-wrap items-center gap-2">
+              {telemetry.simulationState === 'completed' && (
+                <div className="bg-emerald-950/95 border border-emerald-500/50 rounded-lg px-3 py-1.5 pointer-events-auto flex items-center gap-2 text-xs text-emerald-200 shadow-md">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>
+                    <strong>Delivery Complete:</strong> Robot remains parked at destination{' '}
+                    <strong>{telemetry.currentDestination}</strong> (
+                    {telemetry.position.x.toFixed(1)}, {telemetry.position.z.toFixed(1)}). Click{' '}
+                    <strong>Replay Simulation</strong> to run another episode or <strong>Reset</strong> to return to origin.
+                  </span>
+                </div>
+              )}
+
               {activeElevatorCaseId && (
                 <div className="bg-cyan-950/95 border border-cyan-500/50 rounded-lg px-3 py-1.5 pointer-events-auto flex items-center gap-2.5 text-xs text-cyan-200 shadow-md">
                   <Building2 className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
@@ -734,6 +939,9 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
                       <span>
                         {telemetry.simulationState === 'paused'
                           ? 'Resume Simulation'
+                          : telemetry.simulationState === 'completed' ||
+                            telemetry.simulationState === 'failed'
+                          ? 'Replay Simulation'
                           : 'Start Simulation'}
                       </span>
                     </button>
@@ -962,19 +1170,63 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
                       </select>
                     </div>
 
-                    {/* 4. Starting Point Selection */}
+                    {/* 4. Starting Point Selection (Predefined + Interactive 3D Map Placement) */}
                     <div className="min-w-0">
-                      <label className="block text-[11px] text-slate-400 mb-1 truncate">
-                        4. Starting Point
-                      </label>
+                      <div className="flex items-center justify-between gap-1 mb-1">
+                        <label className="block text-[11px] text-slate-400 truncate">
+                          4. Starting Point
+                        </label>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={handleToggle3DStartPlacement}
+                            title="Click directly in the 3D scene to place a custom starting position"
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium flex items-center gap-1 border transition-colors cursor-pointer ${
+                              isPlacingStartOnMap
+                                ? 'bg-cyan-500 text-slate-950 border-cyan-400 font-semibold'
+                                : 'bg-slate-800 hover:bg-slate-700 text-cyan-300 border-cyan-500/40'
+                            }`}
+                          >
+                            <Crosshair className="w-2.5 h-2.5" />
+                            <span>{isPlacingStartOnMap ? 'Click 3D Map...' : 'Place in 3D'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setShowCustomCoordInput((prev) => !prev)}
+                            title="Enter or test custom X/Z starting coordinates"
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition-colors cursor-pointer ${
+                              showCustomCoordInput || customStartPosition
+                                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                                : 'bg-slate-900 hover:bg-slate-800 text-slate-400 border-slate-700'
+                            }`}
+                          >
+                            X,Z
+                          </button>
+                        </div>
+                      </div>
                       <select
-                        value={originOverrideId || activeScenario.originId}
+                        value={
+                          customStartPosition
+                            ? '__custom_3d_start__'
+                            : originOverrideId || activeScenario.originId
+                        }
                         onChange={(e) => {
+                          if (e.target.value === '__custom_3d_start__') return;
                           setActiveElevatorCaseId('');
+                          setCustomStartPosition(null);
+                          setIsPlacingStartOnMap(false);
+                          setStartPlacementFeedback(null);
+                          sceneManagerRef.current?.setStartPlacementMode(false);
+                          sceneManagerRef.current?.setCustomStartPosition(null);
                           setOriginOverrideId(e.target.value);
                           const origLoc = availableLocations.find(
                             (l) => l.id === e.target.value
                           );
+                          if (origLoc) {
+                            setCustomCoordX(String(origLoc.position[0]));
+                            setCustomCoordZ(String(origLoc.position[2]));
+                            setPlacementFloor(origLoc.floor ?? 0);
+                          }
                           const destLoc = availableLocations.find(
                             (l) =>
                               l.id ===
@@ -990,12 +1242,118 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
                         }}
                         className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
                       >
+                        {customStartPosition && (
+                          <option value="__custom_3d_start__">
+                            ★ {customStartPosition.label || `Custom 3D Start`} [(
+                            {customStartPosition.x.toFixed(1)},{' '}
+                            {customStartPosition.z.toFixed(1)}) ·{' '}
+                            {customStartPosition.floor}F]
+                          </option>
+                        )}
                         {availableLocations.map((loc) => (
                           <option key={loc.id} value={loc.id}>
-                            {loc.name} [{loc.code} · {loc.floor ?? 0}F]
+                            {loc.name} [{loc.code} · {loc.floor ?? 0}F · (
+                            {loc.position[0]}, {loc.position[2]})]
                           </option>
                         ))}
                       </select>
+
+                      {(showCustomCoordInput || isPlacingStartOnMap) && (
+                        <div className="mt-1.5 p-2 rounded-lg bg-slate-900/95 border border-slate-700/90 space-y-1.5 text-[11px]">
+                          <div className="flex items-center justify-between gap-1 text-slate-300 font-medium">
+                            <span>Custom Start Coordinates</span>
+                            <select
+                              value={placementFloor}
+                              onChange={(e) => {
+                                const nextFl = Number(e.target.value);
+                                setPlacementFloor(nextFl);
+                                if (isPlacingStartOnMap && sceneManagerRef.current) {
+                                  sceneManagerRef.current.setStartPlacementMode(
+                                    true,
+                                    nextFl,
+                                    (validation) => {
+                                      if (validation.valid) {
+                                        const flCode =
+                                          validation.position.floor === 0
+                                            ? 'G'
+                                            : `${validation.position.floor}F`;
+                                        setCustomStartPosition({
+                                          x: validation.position.x,
+                                          z: validation.position.z,
+                                          y: validation.position.y,
+                                          floor: validation.position.floor,
+                                          label: `3D Map Start (${validation.position.x.toFixed(
+                                            1
+                                          )}, ${validation.position.z.toFixed(
+                                            1
+                                          )}, ${flCode})`,
+                                        });
+                                        setOriginOverrideId('');
+                                        setCustomCoordX(String(validation.position.x));
+                                        setCustomCoordZ(String(validation.position.z));
+                                        setIsPlacingStartOnMap(false);
+                                        setStartPlacementFeedback({
+                                          valid: true,
+                                          message: `Starting position set to (${validation.position.x.toFixed(
+                                            1
+                                          )}, ${validation.position.z.toFixed(
+                                            1
+                                          )}) on Floor ${flCode} (${
+                                            validation.routeWaypointsCount
+                                          } A* waypoints).`,
+                                        });
+                                      } else {
+                                        setStartPlacementFeedback({
+                                          valid: false,
+                                          message:
+                                            validation.reason ||
+                                            'Invalid starting position rejected.',
+                                        });
+                                      }
+                                    }
+                                  );
+                                }
+                              }}
+                              className="bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-[10px] text-cyan-300 font-mono"
+                            >
+                              {(activeEnvironment?.floors ?? [{ floor: 0 }, { floor: 1 }, { floor: 2 }]).map(
+                                (fl) => (
+                                  <option key={fl.floor} value={fl.floor}>
+                                    Floor {fl.floor}F
+                                  </option>
+                                )
+                              )}
+                            </select>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              step="0.5"
+                              value={customCoordX}
+                              onChange={(e) => setCustomCoordX(e.target.value)}
+                              placeholder="X (m)"
+                              aria-label="Custom Start X Coordinate"
+                              className="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-1 text-[11px] font-mono text-slate-100"
+                            />
+                            <input
+                              type="number"
+                              step="0.5"
+                              value={customCoordZ}
+                              onChange={(e) => setCustomCoordZ(e.target.value)}
+                              placeholder="Z (m)"
+                              aria-label="Custom Start Z Coordinate"
+                              className="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-1 text-[11px] font-mono text-slate-100"
+                            />
+                            <button
+                              type="button"
+                              onClick={handleApplyCustomCoordinates}
+                              className="px-2 py-1 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-[10px] whitespace-nowrap cursor-pointer"
+                            >
+                              Set
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     {/* 5. Delivery Destination Selection */}
@@ -1049,7 +1407,7 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
                       >
                         {policies.map((pol) => (
                           <option key={pol.id} value={pol.id}>
-                            {pol.name}
+                            {pol.name} (v{pol.version})
                           </option>
                         ))}
                       </select>

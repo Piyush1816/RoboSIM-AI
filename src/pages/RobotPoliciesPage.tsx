@@ -54,11 +54,13 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
     setSelectedEnvironmentId,
     candidatePolicyState,
     updateCandidatePolicyState,
+    saveAndActivateCandidatePolicy,
     resetCandidatePolicy,
     recordExperimentsBatch,
   } = useExperimentStore();
 
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  const [errorNotice, setErrorNotice] = useState<string | null>(null);
   const [episodesToTrain, setEpisodesToTrain] = useState<number>(12);
   const [selectedTrainScenarioIds, setSelectedTrainScenarioIds] = useState<string[]>(
     () => {
@@ -207,10 +209,18 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
     }
 
     setTrainingStatus('idle');
-    onSelectPolicy('pol-candidate-rl');
-    setSavedNotice(
-      `Training completed on ${activeRobot.name} in ${activeEnvironment.name}: Candidate Policy updated to v${updatedPolicyState.version} across ${bufferedExperiments.length} simulated episodes and activated.`
-    );
+    setErrorNotice(null);
+    const activationRes = saveAndActivateCandidatePolicy(updatedPolicyState);
+    if (activationRes.success) {
+      onSelectPolicy('pol-candidate-rl');
+      setSavedNotice(
+        `Training completed on ${activeRobot.name} in ${activeEnvironment.name}: Saved learned Q-table (${Object.keys(updatedPolicyState.qTable).length} states across ${updatedPolicyState.totalEpisodesTrained} total episodes) and activated Candidate Policy v${updatedPolicyState.version} for Simulation Lab.`
+      );
+    } else {
+      setSavedNotice(
+        `Training completed (${bufferedExperiments.length} episodes). Click "Save & Activate Candidate Policy" when ready.`
+      );
+    }
   };
 
   const handlePauseResume = () => {
@@ -410,6 +420,21 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
           </div>
         </div>
       </div>
+
+      {errorNotice && (
+        <div className="bg-rose-500/15 border border-rose-500/40 rounded-lg px-4 py-2.5 flex items-center justify-between text-xs text-rose-200">
+          <span className="flex items-center gap-2">
+            <Shield className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{errorNotice}</span>
+          </span>
+          <button
+            onClick={() => setErrorNotice(null)}
+            className="text-rose-300 hover:text-white underline cursor-pointer ml-4"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {savedNotice && (
         <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-lg px-4 py-2.5 flex items-center justify-between text-xs text-cyan-200">
@@ -1017,19 +1042,111 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
             })}
           </div>
 
+          {/* Candidate Policy Metadata & Persistence Status */}
+          <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 space-y-2 text-[11px]">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
+              <span className="font-mono text-slate-400">
+                Policy ID: <strong className="text-slate-200">{candidatePolicyState.id}</strong>
+              </span>
+              {selectedPolicyId === 'pol-candidate-rl' &&
+              candidatePolicyState.isTrained &&
+              Object.keys(candidatePolicyState.qTable).length > 0 ? (
+                <span className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 font-semibold">
+                  ACTIVE IN SIMULATION LAB
+                </span>
+              ) : candidatePolicyState.isTrained &&
+                Object.keys(candidatePolicyState.qTable).length > 0 ? (
+                <span className="px-2 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 font-medium">
+                  TRAINED · STANDBY
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 font-medium">
+                  UNTRAINED (EMPTY Q-TABLE)
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-slate-400">
+              <div>
+                Learned Q-States:{' '}
+                <strong className="text-cyan-300 font-mono">
+                  {Object.keys(candidatePolicyState.qTable).length} states
+                </strong>
+              </div>
+              <div>
+                Version:{' '}
+                <strong className="text-slate-200 font-mono">
+                  v{candidatePolicyState.version}
+                </strong>
+              </div>
+              <div className="truncate" title={candidatePolicyState.trainedRobotName || activeRobot.name}>
+                Robot Compat.:{' '}
+                <strong className="text-slate-200">
+                  {candidatePolicyState.trainedRobotName || activeRobot.name}
+                </strong>
+              </div>
+              <div
+                className="truncate"
+                title={candidatePolicyState.trainedEnvironmentName || activeEnvironment.name}
+              >
+                Env. Compat.:{' '}
+                <strong className="text-slate-200">
+                  {candidatePolicyState.trainedEnvironmentName || activeEnvironment.name}
+                </strong>
+              </div>
+              {candidatePolicyState.lastTrainedAt && (
+                <div>
+                  Last Trained:{' '}
+                  <strong className="text-slate-300 font-mono">
+                    {new Date(candidatePolicyState.lastTrainedAt).toLocaleTimeString()}
+                  </strong>
+                </div>
+              )}
+              {candidatePolicyState.activatedAt && (
+                <div>
+                  Activated:{' '}
+                  <strong className="text-emerald-300 font-mono">
+                    {new Date(candidatePolicyState.activatedAt).toLocaleTimeString()}
+                  </strong>
+                </div>
+              )}
+            </div>
+          </div>
+
           <div className="pt-2 flex flex-col gap-2">
             <button
               onClick={() => {
+                setErrorNotice(null);
+                setSavedNotice(null);
+                const result = saveAndActivateCandidatePolicy(candidatePolicyState);
+                if (!result.success) {
+                  setErrorNotice(
+                    result.error ||
+                      'Cannot activate candidate policy: please train at least 1 episode first so a valid Q-table exists.'
+                  );
+                  return;
+                }
                 onSelectPolicy('pol-candidate-rl');
+                const learnedStatesCount = Object.keys(
+                  result.candidateState.qTable
+                ).length;
                 setSavedNotice(
-                  `Saved & activated Candidate Q-Learning Policy (${candidatePolicyState.version}) in localStorage.`
+                  `Saved & activated ${result.candidateState.name} (v${result.candidateState.version}) with ${learnedStatesCount} learned Q-table states (${result.candidateState.totalEpisodesTrained} episodes, mean reward ${avgTrainReward.toFixed(1)}). Subsequent Simulation Lab runs will now use this trained Q-table.`
                 );
               }}
-              className="w-full py-2.5 px-4 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs flex items-center justify-center gap-2 cursor-pointer"
+              className={`w-full py-2.5 px-4 rounded-lg font-semibold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer ${
+                candidatePolicyState.isTrained &&
+                Object.keys(candidatePolicyState.qTable).length > 0
+                  ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-lg shadow-emerald-500/15'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
+              }`}
             >
               <Save className="w-4 h-4" />
               <span>
-                Save & Activate Candidate Policy (v{candidatePolicyState.version})
+                {selectedPolicyId === 'pol-candidate-rl' &&
+                candidatePolicyState.isTrained &&
+                Object.keys(candidatePolicyState.qTable).length > 0
+                  ? `Saved & Active in Simulation Lab (v${candidatePolicyState.version})`
+                  : `Save & Activate Candidate Policy (v${candidatePolicyState.version})`}
               </span>
             </button>
           </div>
@@ -1094,7 +1211,26 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
                 </div>
 
                 <button
-                  onClick={() => onSelectPolicy(pol.id)}
+                  onClick={() => {
+                    setErrorNotice(null);
+                    if (pol.id === 'pol-candidate-rl') {
+                      const res = saveAndActivateCandidatePolicy(candidatePolicyState);
+                      if (!res.success) {
+                        setErrorNotice(
+                          res.error ||
+                            'Cannot activate untrained Candidate Q-Learning Policy. Please run training episodes first.'
+                        );
+                        return;
+                      }
+                      onSelectPolicy('pol-candidate-rl');
+                      setSavedNotice(
+                        `Activated Candidate Q-Learning Policy (v${res.candidateState.version}) with ${Object.keys(res.candidateState.qTable).length} learned Q-table states.`
+                      );
+                    } else {
+                      onSelectPolicy(pol.id);
+                      setSavedNotice(`Activated ${pol.name} (v${pol.version}) for Simulation Lab.`);
+                    }
+                  }}
                   className={`w-full py-2 px-3 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                     isActive
                       ? 'bg-cyan-500 text-slate-950'

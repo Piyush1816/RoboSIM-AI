@@ -29,6 +29,7 @@ import {
 } from '../simulation/pathfinding';
 import {
   CameraPresetId,
+  CustomStartPosition,
   ElevatorFaultMode,
   EnvironmentDefinition,
   LiveTelemetry,
@@ -38,6 +39,7 @@ import {
   RobotUnitConfig,
   ScenarioConfig,
   SimulationLogEntry,
+  StartPositionValidationResult,
   Vector2D,
 } from '../types/simulation';
 
@@ -55,6 +57,10 @@ interface DynamicPedestrianMeshHandle {
   debugRing: THREE.LineLoop;
   predLine: THREE.Line;
 }
+
+// Module-level cached controller so navigating away from Simulation Lab and returning
+// preserves a completed, paused, or failed simulation at its exact robot position & state.
+let persistedLabController: AutonomousNavigationController | null = null;
 
 export class CampusSceneManager {
   private container: HTMLElement;
@@ -81,9 +87,20 @@ export class CampusSceneManager {
 
   private pathLineGroup = new THREE.Group();
   private nextWaypointMarkerGroup = new THREE.Group();
+  private customStartMarkerGroup = new THREE.Group();
+  private placementHoverGroup = new THREE.Group();
+  private placementHoverRingMat!: THREE.MeshBasicMaterial;
   private gridOverlayGroup = new THREE.Group();
   private collisionDebugGroup = new THREE.Group();
   private robotCurrentCellMarker!: THREE.Group;
+
+  // Interactive 3D Start Placement Mode State
+  private isPlacingStartPoint = false;
+  private placementTargetFloor = 0;
+  private onStartPointPlacedCallback:
+    | ((result: StartPositionValidationResult) => void)
+    | null = null;
+  private lastRouteConfigKey = '';
 
   private constructionGroups = new Map<string, THREE.Group>();
   private deliveryRingMeshes: THREE.Mesh[] = [];
@@ -228,40 +245,78 @@ export class CampusSceneManager {
     this.buildAutonomousRobot();
     this.buildRobotCurrentCellMarker();
     this.buildNextWaypointMarker();
+    this.buildCustomStartAndHoverMarkers();
 
     this.scene.add(this.pathLineGroup);
     this.scene.add(this.nextWaypointMarkerGroup);
+    this.scene.add(this.customStartMarkerGroup);
+    this.scene.add(this.placementHoverGroup);
     this.scene.add(this.gridOverlayGroup);
     this.scene.add(this.collisionDebugGroup);
     this.scene.add(this.predictiveConflictGroup);
     this.scene.add(this.dynamicObstacleGroup);
 
-    // 6. Initialize AutonomousNavigationController after all 3D visual resources are ready
-    this.navController = new AutonomousNavigationController(
-      initialScenario,
-      initialPolicy,
-      initialRobotId,
-      {
-        onPathUpdated: (pathEvent) => {
-          this.rebuildPathVisual(pathEvent);
-        },
-        onStatusChanged: () => {
-          this.updateStatusLightColor();
-        },
-        onLogEvent: (level, message) => {
-          this.emitLog(level, message);
-        },
-        onComplete: (payload) => {
-          this.emitTelemetry();
-          this.onSimulationComplete(payload);
-        },
+    // 6. Initialize or reuse AutonomousNavigationController after all 3D visual resources are ready
+    const controllerCallbacks = {
+      onPathUpdated: (pathEvent: PathUpdateEvent | null) => {
+        this.rebuildPathVisual(pathEvent);
       },
-      initialEnvironment
-    );
-    if (initialPolicy.isCandidatePolicy) {
-      this.navController.setCandidatePolicyState(loadCandidatePolicyState(), false);
+      onStatusChanged: () => {
+        this.updateStatusLightColor();
+      },
+      onLogEvent: (level: SimulationLogEntry['level'], message: string) => {
+        this.emitLog(level, message);
+      },
+      onComplete: (payload: SimulationCompletionData) => {
+        this.syncVisualsFromController();
+        this.emitTelemetry();
+        this.onSimulationComplete(payload);
+      },
+    };
+
+    const canReusePersisted =
+      persistedLabController !== null &&
+      (persistedLabController.currentEnvironment?.id ?? 'env-campus-main') ===
+        (initialEnvironment?.id ?? 'env-campus-main') &&
+      persistedLabController.currentScenario.id === initialScenario.id &&
+      persistedLabController.currentRobotId === initialRobotId;
+
+    if (canReusePersisted && persistedLabController) {
+      this.navController = persistedLabController;
+      this.navController.setCallbacks(controllerCallbacks);
+      this.navController.updatePolicyOnly(
+        initialPolicy,
+        initialPolicy.isCandidatePolicy ? loadCandidatePolicyState() : null
+      );
+    } else {
+      this.navController = new AutonomousNavigationController(
+        initialScenario,
+        initialPolicy,
+        initialRobotId,
+        controllerCallbacks,
+        initialEnvironment
+      );
+      if (initialPolicy.isCandidatePolicy) {
+        this.navController.setCandidatePolicyState(loadCandidatePolicyState(), false);
+      }
+      persistedLabController = this.navController;
     }
 
+    this.lastRouteConfigKey = this.computeRouteConfigKey(
+      initialScenario,
+      initialRobotId,
+      this.navController.destinationOverrideId,
+      this.navController.originOverrideId,
+      initialEnvironment,
+      this.navController.customStartPosition
+    );
+
+    const allRobots = loadRobots();
+    const initialBot =
+      allRobots.find((r) => r.id === initialRobotId) ??
+      ROBOT_UNITS.find((r) => r.id === initialRobotId) ??
+      ROBOT_UNITS[0];
+    this.buildAutonomousRobot(initialBot);
     this.syncVisualsFromController();
     this.emitTelemetry();
 
@@ -1815,11 +1870,230 @@ export class CampusSceneManager {
     }
   }
 
+  private buildCustomStartAndHoverMarkers(): void {
+    // Custom Start Marker (Persistent cyan/emerald beacon ring when custom start is active)
+    this.customStartMarkerGroup.visible = false;
+    const outerRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.85, 1.15, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0x06b6d4,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.9,
+      })
+    );
+    outerRing.rotation.x = -Math.PI / 2;
+    outerRing.position.y = 0.14;
+    this.customStartMarkerGroup.add(outerRing);
+
+    const innerDisc = new THREE.Mesh(
+      new THREE.CircleGeometry(0.45, 24),
+      new THREE.MeshBasicMaterial({
+        color: 0x10b981,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.55,
+      })
+    );
+    innerDisc.rotation.x = -Math.PI / 2;
+    innerDisc.position.y = 0.15;
+    this.customStartMarkerGroup.add(innerDisc);
+
+    const beaconPin = new THREE.Mesh(
+      new THREE.ConeGeometry(0.24, 0.7, 16),
+      new THREE.MeshBasicMaterial({ color: 0x22d3ee })
+    );
+    beaconPin.rotation.x = Math.PI;
+    beaconPin.position.y = 1.25;
+    this.customStartMarkerGroup.add(beaconPin);
+
+    // Interactive Placement Hover Preview Ring
+    this.placementHoverGroup.visible = false;
+    this.placementHoverRingMat = new THREE.MeshBasicMaterial({
+      color: 0x10b981,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.85,
+    });
+    const hoverRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.7, 1.05, 32),
+      this.placementHoverRingMat
+    );
+    hoverRing.rotation.x = -Math.PI / 2;
+    hoverRing.position.y = 0.16;
+    this.placementHoverGroup.add(hoverRing);
+  }
+
+  private updateCustomStartMarkerVisual(): void {
+    if (!this.navController) return;
+    const customPos = this.navController.customStartPosition;
+    if (customPos) {
+      const y = Number(((customPos.floor ?? 0) * 3.6).toFixed(2));
+      this.customStartMarkerGroup.position.set(customPos.x, y, customPos.z);
+      this.customStartMarkerGroup.visible = true;
+    } else {
+      this.customStartMarkerGroup.visible = false;
+    }
+  }
+
+  private computeRouteConfigKey(
+    scenario: ScenarioConfig,
+    robotId: string,
+    destinationOverrideId: string | null,
+    originOverrideId: string | null,
+    environment?: EnvironmentDefinition | null,
+    customStartPos?: CustomStartPosition | null
+  ): string {
+    const envKey = `${environment?.id ?? 'env-campus-main'}:${
+      environment?.updatedAt ?? ''
+    }`;
+    const scenKey = `${scenario.id}:${scenario.originId}:${
+      scenario.destinationId
+    }:${scenario.randomSeed ?? 101}:${(
+      scenario.activeConstructionZones ?? []
+    ).join(',')}`;
+    const customKey = customStartPos
+      ? `${customStartPos.x.toFixed(2)},${customStartPos.z.toFixed(2)},${
+          customStartPos.floor
+        },${(customStartPos.headingRad ?? 0).toFixed(2)}`
+      : 'none';
+    return `${envKey}|${scenKey}|${robotId}|${destinationOverrideId ?? ''}|${
+      originOverrideId ?? ''
+    }|${customKey}`;
+  }
+
+  public setStartPlacementMode(
+    enabled: boolean,
+    floor = 0,
+    onPlaced?: (result: StartPositionValidationResult) => void
+  ): void {
+    this.isPlacingStartPoint = enabled;
+    this.placementTargetFloor = floor;
+    this.onStartPointPlacedCallback = onPlaced ?? null;
+    this.placementHoverGroup.visible = false;
+    if (this.renderer?.domElement) {
+      this.renderer.domElement.style.cursor = enabled ? 'crosshair' : 'default';
+    }
+    if (enabled && floor > 0) {
+      this.setVisualLayers({ showBuildingCutaway: true });
+    }
+  }
+
+  public setCustomStartPosition(
+    customPos: CustomStartPosition | null
+  ): StartPositionValidationResult | null {
+    const result = this.navController.setCustomStartPosition(customPos);
+    this.lastRouteConfigKey = this.computeRouteConfigKey(
+      this.navController.currentScenario,
+      this.navController.currentRobotId,
+      this.navController.destinationOverrideId,
+      this.navController.originOverrideId,
+      this.activeEnvironment,
+      this.navController.customStartPosition
+    );
+    this.updateCustomStartMarkerVisual();
+    this.syncVisualsFromController();
+    this.emitTelemetry();
+    return result;
+  }
+
+  public getCustomStartPosition(): CustomStartPosition | null {
+    return this.navController?.customStartPosition ?? null;
+  }
+
   private setupInteractionEvents(): void {
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
+    let pointerDownPos = { x: 0, y: 0 };
+
+    const raycastFloorPlane = (
+      clientX: number,
+      clientY: number,
+      floor: number
+    ): THREE.Vector3 | null => {
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, this.camera);
+      const planeY = Number((floor * 3.6).toFixed(2));
+      const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -planeY);
+      const hitPoint = new THREE.Vector3();
+      const intersected = raycaster.ray.intersectPlane(floorPlane, hitPoint);
+      return intersected ? hitPoint : null;
+    };
+
+    const onPointerMove = (e: MouseEvent) => {
+      if (!this.isPlacingStartPoint) {
+        if (this.placementHoverGroup.visible) {
+          this.placementHoverGroup.visible = false;
+        }
+        return;
+      }
+      const hit = raycastFloorPlane(
+        e.clientX,
+        e.clientY,
+        this.placementTargetFloor
+      );
+      if (!hit) {
+        this.placementHoverGroup.visible = false;
+        return;
+      }
+      const validation = this.navController.validateStartPosition(
+        hit.x,
+        hit.z,
+        this.placementTargetFloor
+      );
+      const planeY = Number((this.placementTargetFloor * 3.6).toFixed(2));
+      this.placementHoverGroup.position.set(hit.x, planeY, hit.z);
+      this.placementHoverRingMat.color.setHex(
+        validation.valid ? 0x10b981 : 0xef4444
+      );
+      this.placementHoverGroup.visible = true;
+    };
 
     const onPointerDown = (e: MouseEvent) => {
+      pointerDownPos = { x: e.clientX, y: e.clientY };
+    };
+
+    const onPointerUp = (e: MouseEvent) => {
+      const moveDist = Math.hypot(
+        e.clientX - pointerDownPos.x,
+        e.clientY - pointerDownPos.y
+      );
+      // Ignore camera orbit drags
+      if (moveDist > 6) return;
+
+      if (this.isPlacingStartPoint) {
+        const hit = raycastFloorPlane(
+          e.clientX,
+          e.clientY,
+          this.placementTargetFloor
+        );
+        if (hit) {
+          const floorCode =
+            this.placementTargetFloor === 0
+              ? 'G'
+              : `${this.placementTargetFloor}F`;
+          const validation = this.setCustomStartPosition({
+            x: Number(hit.x.toFixed(1)),
+            z: Number(hit.z.toFixed(1)),
+            floor: this.placementTargetFloor,
+            label: `3D Map Start (${hit.x.toFixed(1)}, ${hit.z.toFixed(
+              1
+            )}, ${floorCode})`,
+          });
+          if (validation) {
+            if (validation.valid) {
+              this.isPlacingStartPoint = false;
+              this.placementHoverGroup.visible = false;
+              this.renderer.domElement.style.cursor = 'default';
+            }
+            this.onStartPointPlacedCallback?.(validation);
+          }
+        }
+        return;
+      }
+
       const rect = this.renderer.domElement.getBoundingClientRect();
       pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -1835,7 +2109,9 @@ export class CampusSceneManager {
       }
     };
 
+    this.renderer.domElement.addEventListener('pointermove', onPointerMove);
     this.renderer.domElement.addEventListener('pointerdown', onPointerDown);
+    this.renderer.domElement.addEventListener('pointerup', onPointerUp);
   }
 
   public resize(): void {
@@ -1853,7 +2129,8 @@ export class CampusSceneManager {
     robotId: string,
     destinationOverrideId: string | null = null,
     originOverrideId: string | null = null,
-    environment?: EnvironmentDefinition | null
+    environment?: EnvironmentDefinition | null,
+    customStartPosition?: CustomStartPosition | null
   ): void {
     const allRobots = loadRobots();
     const bot =
@@ -1869,6 +2146,38 @@ export class CampusSceneManager {
       this.rebuildEnvironmentGeometry(environment);
     }
 
+    const effectiveCustomStart =
+      customStartPosition !== undefined
+        ? customStartPosition
+        : originOverrideId !== null
+        ? null
+        : this.navController.customStartPosition;
+
+    const nextRouteConfigKey = this.computeRouteConfigKey(
+      scenario,
+      robotId,
+      destinationOverrideId,
+      originOverrideId,
+      environment ?? this.activeEnvironment,
+      effectiveCustomStart
+    );
+
+    // If the route/scenario/environment/start/destination did NOT change (e.g. store updated after completion
+    // or only policy parameters changed), update the policy & candidate Q-table WITHOUT resetting the robot!
+    if (
+      nextRouteConfigKey === this.lastRouteConfigKey &&
+      this.navController.runState !== 'idle'
+    ) {
+      this.navController.setRobotHardwareConfig(bot);
+      this.navController.updatePolicyOnly(
+        policy,
+        policy.isCandidatePolicy ? loadCandidatePolicyState() : null
+      );
+      this.emitTelemetry();
+      return;
+    }
+
+    this.lastRouteConfigKey = nextRouteConfigKey;
     this.navController.setRobotHardwareConfig(bot);
     this.navController.setConfiguration(
       scenario,
@@ -1876,7 +2185,8 @@ export class CampusSceneManager {
       robotId,
       destinationOverrideId,
       originOverrideId,
-      environment
+      environment,
+      effectiveCustomStart
     );
     this.buildAutonomousRobot(bot);
 
@@ -1885,6 +2195,7 @@ export class CampusSceneManager {
     } else {
       this.navController.setCandidatePolicyState(null, false);
     }
+    this.updateCustomStartMarkerVisual();
     this.syncVisualsFromController();
     this.emitTelemetry();
   }
@@ -2069,6 +2380,7 @@ export class CampusSceneManager {
     );
     this.robotGroup.rotation.y = this.navController.robotHeading;
 
+    this.updateCustomStartMarkerVisual();
     this.updateBuildingCutawayTransparency();
     this.updateStatusLightColor();
     this.rebuildDynamicObstacles();

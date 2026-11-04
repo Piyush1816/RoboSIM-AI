@@ -55,6 +55,8 @@ function RoboSimWorkspace() {
     addCustomScenario,
     updatePolicies,
     candidatePolicyState,
+    selectedPolicyId,
+    setSelectedPolicyId,
     benchmarkHistory,
     crossRobotBenchmarks,
   } = useExperimentStore();
@@ -63,7 +65,6 @@ function RoboSimWorkspace() {
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>(
     'scen-construction-detour'
   );
-  const [selectedPolicyId, setSelectedPolicyId] = useState<string>('pol-hybrid-safe');
 
   // Live telemetry state
   const [telemetry, setTelemetry] = useState<LiveTelemetry>({
@@ -146,6 +147,10 @@ function RoboSimWorkspace() {
         runType: 'Interactive',
         originName: payload.originName || originLoc.name,
         destinationName: payload.destinationName || destLoc.name,
+        originFloor: payload.originFloor ?? originLoc.floor ?? 0,
+        destinationFloor: payload.destinationFloor ?? destLoc.floor ?? 0,
+        originCoordinates: payload.originCoordinates,
+        destinationCoordinates: payload.destinationCoordinates,
         status: payload.status,
         durationSec: payload.durationSec,
         distanceMeters: payload.distanceMeters,
@@ -267,6 +272,8 @@ function RoboSimWorkspace() {
           activeRobotName={activeRobot.name}
           activeScenarioName={activeScenario.name}
           activeEnvironmentName={activeEnvironment.name}
+          activePolicyName={activePolicy.name}
+          activePolicyVersion={`v${activePolicy.version}`}
           onQuickOpenSimLab={() => setActivePage('simulation-lab')}
         />
 

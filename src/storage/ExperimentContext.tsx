@@ -26,6 +26,7 @@ import {
   loadRobots,
   loadScenarios,
   loadSelectedEnvironmentId,
+  loadSelectedPolicyId,
   loadSelectedRobotId,
   loadStoredExperiments,
   OverviewMetricsSummary,
@@ -42,10 +43,12 @@ import {
   saveFailureDrivenBatch,
   savePolicies,
   saveSelectedEnvironmentId,
+  saveSelectedPolicyId,
   saveSelectedRobotId,
   saveStoredExperiment,
   saveStoredExperimentsBatch,
   subscribeToStoreChanges,
+  validateAndSaveAndActivateCandidatePolicy,
 } from './experimentStorage';
 import {
   BenchmarkSuiteResult,
@@ -72,6 +75,13 @@ interface ExperimentStoreContextValue {
   policyAnalytics: PolicyAnalyticsSummary[];
   scenarios: ScenarioConfig[];
   policies: NavigationPolicyConfig[];
+  selectedPolicyId: string;
+  setSelectedPolicyId: (policyId: string) => void;
+  saveAndActivateCandidatePolicy: (candidateOverride?: CandidatePolicyState) => {
+    success: boolean;
+    error?: string;
+    candidateState: CandidatePolicyState;
+  };
   environments: EnvironmentDefinition[];
   selectedEnvironmentId: string;
   activeEnvironment: EnvironmentDefinition;
@@ -107,6 +117,22 @@ const ExperimentStoreContext = createContext<ExperimentStoreContextValue | null>
   null
 );
 
+function setIfChanged<T>(
+  setter: React.Dispatch<React.SetStateAction<T>>,
+  nextValue: T
+): void {
+  setter((prev) => {
+    try {
+      if (JSON.stringify(prev) === JSON.stringify(nextValue)) {
+        return prev;
+      }
+    } catch {
+      // Fallback to nextValue if serialization fails
+    }
+    return nextValue;
+  });
+}
+
 export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
@@ -118,6 +144,9 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
   );
   const [policies, setPolicies] = useState<NavigationPolicyConfig[]>(() =>
     loadPolicies()
+  );
+  const [selectedPolicyIdState, setSelectedPolicyIdState] = useState<string>(() =>
+    loadSelectedPolicyId()
   );
   const [environments, setEnvironments] = useState<EnvironmentDefinition[]>(() =>
     loadEnvironments()
@@ -143,19 +172,21 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
     loadDemoPreviewPreference()
   );
 
-  // Sync whenever localStorage or same-tab/cross-tab pub/sub fires
+  // Sync whenever localStorage or same-tab/cross-tab pub/sub fires.
+  // Use setIfChanged so recording an experiment does not re-allocate environments, scenarios, or policies.
   const syncFromStorage = useCallback(() => {
-    setStoredExperiments(loadStoredExperiments());
-    setScenarios(loadScenarios());
-    setPolicies(loadPolicies());
-    setEnvironments(loadEnvironments());
+    setIfChanged(setStoredExperiments, loadStoredExperiments());
+    setIfChanged(setScenarios, loadScenarios());
+    setIfChanged(setPolicies, loadPolicies());
+    setSelectedPolicyIdState(loadSelectedPolicyId());
+    setIfChanged(setEnvironments, loadEnvironments());
     setSelectedEnvironmentIdState(loadSelectedEnvironmentId());
-    setRobots(loadRobots());
+    setIfChanged(setRobots, loadRobots());
     setSelectedRobotIdState(loadSelectedRobotId());
-    setCandidatePolicyState(loadCandidatePolicyState());
-    setBenchmarkHistory(loadBenchmarkHistory());
-    setCrossRobotBenchmarks(loadCrossRobotBenchmarkHistory());
-    setFailureDrivenBatches(loadFailureDrivenBatches());
+    setIfChanged(setCandidatePolicyState, loadCandidatePolicyState());
+    setIfChanged(setBenchmarkHistory, loadBenchmarkHistory());
+    setIfChanged(setCrossRobotBenchmarks, loadCrossRobotBenchmarkHistory());
+    setIfChanged(setFailureDrivenBatches, loadFailureDrivenBatches());
     setDemoPreviewState(loadDemoPreviewPreference());
   }, []);
 
@@ -247,14 +278,94 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
     savePolicies(updated);
   }, []);
 
+  const setSelectedPolicyId = useCallback((policyId: string) => {
+    setSelectedPolicyIdState(policyId);
+    saveSelectedPolicyId(policyId);
+    setCandidatePolicyState((prev) => ({
+      ...prev,
+      isActive: policyId === 'pol-candidate-rl',
+      activatedAt:
+        policyId === 'pol-candidate-rl'
+          ? prev.activatedAt || new Date().toISOString()
+          : prev.activatedAt,
+    }));
+    setPolicies((prev) =>
+      prev.map((p) => ({
+        ...p,
+        isActive: p.id === policyId,
+      }))
+    );
+  }, []);
+
   const updateCandidatePolicyState = useCallback(
     (nextState: CandidatePolicyState) => {
-      setCandidatePolicyState(nextState);
-      saveCandidatePolicyState(nextState);
-      // Also sync the version string onto the 'pol-candidate-rl' policy card
+      const history = Array.isArray(nextState.trainingHistory)
+        ? nextState.trainingHistory
+        : [];
+      const episodesCompleted =
+        history.length > 0 ? history.length : nextState.totalEpisodesTrained;
+      const successCount = history.filter((ep) => ep.status === 'Success').length;
+      const failureCount = history.length - successCount;
+      const successRatePct =
+        history.length > 0
+          ? Number(((successCount / history.length) * 100).toFixed(1))
+          : 0;
+      const meanReward =
+        history.length > 0
+          ? Number(
+              (
+                history.reduce((acc, ep) => acc + ep.totalReward, 0) /
+                history.length
+              ).toFixed(1)
+            )
+          : 0;
+      const safetyInterventions = history.reduce(
+        (acc, ep) => acc + (ep.safetyInterventionCount ?? 0),
+        0
+      );
+      const qTableCount = nextState.qTable
+        ? Object.keys(nextState.qTable).length
+        : 0;
+
+      const enriched: CandidatePolicyState = {
+        ...nextState,
+        createdAt:
+          nextState.createdAt ??
+          nextState.lastTrainedAt ??
+          new Date().toISOString(),
+        isActive: loadSelectedPolicyId() === 'pol-candidate-rl',
+        trainingMetricsSummary: {
+          episodesCompleted,
+          successCount,
+          failureCount,
+          successRatePct,
+          meanReward,
+          safetyInterventions,
+          learnedStatesCount: qTableCount,
+        },
+      };
+
+      setCandidatePolicyState(enriched);
+      saveCandidatePolicyState(enriched);
+      // Also sync the version string and metadata onto the 'pol-candidate-rl' policy card
       setPolicies((prev) => {
         const next = prev.map((p) =>
-          p.id === 'pol-candidate-rl' ? { ...p, version: nextState.version } : p
+          p.id === 'pol-candidate-rl'
+            ? {
+                ...p,
+                name: enriched.name || p.name,
+                version: enriched.version,
+                createdAt: enriched.createdAt ?? p.createdAt,
+                activatedAt: enriched.activatedAt ?? p.activatedAt,
+                isActive: enriched.isActive,
+                trainedRobotId: enriched.trainedRobotId,
+                trainedRobotName: enriched.trainedRobotName,
+                trainedEnvironmentId: enriched.trainedEnvironmentId,
+                trainedEnvironmentName: enriched.trainedEnvironmentName,
+                totalEpisodesTrained: enriched.totalEpisodesTrained,
+                meanEpisodeReward: meanReward,
+              }
+            : p
         );
         savePolicies(next);
         return next;
@@ -263,9 +374,48 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
     []
   );
 
+  const saveAndActivateCandidatePolicy = useCallback(
+    (candidateOverride?: CandidatePolicyState) => {
+      const result = validateAndSaveAndActivateCandidatePolicy(
+        candidateOverride ?? candidatePolicyState
+      );
+      if (result.success) {
+        setCandidatePolicyState(result.candidateState);
+        setPolicies(result.policies);
+        setSelectedPolicyIdState(result.activePolicyId);
+      }
+      return {
+        success: result.success,
+        error: result.error,
+        candidateState: result.candidateState,
+      };
+    },
+    [candidatePolicyState]
+  );
+
   const resetCandidatePolicy = useCallback((): CandidatePolicyState => {
     const fresh = resetCandidatePolicyState();
     setCandidatePolicyState(fresh);
+    setPolicies((prev) => {
+      const next = prev.map((p) =>
+        p.id === 'pol-candidate-rl'
+          ? {
+              ...p,
+              version: fresh.version,
+              isActive: false,
+              activatedAt: undefined,
+              totalEpisodesTrained: 0,
+              meanEpisodeReward: undefined,
+            }
+          : p
+      );
+      savePolicies(next);
+      return next;
+    });
+    if (loadSelectedPolicyId() === 'pol-candidate-rl') {
+      setSelectedPolicyIdState('pol-hybrid-safe');
+      saveSelectedPolicyId('pol-hybrid-safe');
+    }
     return fresh;
   }, []);
 
@@ -393,6 +543,9 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
       policyAnalytics,
       scenarios,
       policies,
+      selectedPolicyId: selectedPolicyIdState,
+      setSelectedPolicyId,
+      saveAndActivateCandidatePolicy,
       environments,
       selectedEnvironmentId: selectedEnvironmentIdState,
       activeEnvironment,
@@ -433,6 +586,9 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
       policyAnalytics,
       scenarios,
       policies,
+      selectedPolicyIdState,
+      setSelectedPolicyId,
+      saveAndActivateCandidatePolicy,
       environments,
       selectedEnvironmentIdState,
       activeEnvironment,
@@ -481,3 +637,4 @@ export function useExperimentStore(): ExperimentStoreContextValue {
   }
   return ctx;
 }
+

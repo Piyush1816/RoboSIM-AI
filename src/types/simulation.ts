@@ -477,6 +477,33 @@ export interface NavigationPolicyConfig {
   batteryReserveThresholdPct: number;
   isCandidatePolicy?: boolean;
   isReadOnlyBaseline?: boolean;
+  createdAt?: string;
+  activatedAt?: string;
+  isActive?: boolean;
+  trainedRobotId?: string;
+  trainedRobotName?: string;
+  trainedEnvironmentId?: string;
+  trainedEnvironmentName?: string;
+  totalEpisodesTrained?: number;
+  meanEpisodeReward?: number;
+}
+
+export interface CustomStartPosition {
+  x: number;
+  z: number;
+  y?: number;
+  floor: number;
+  headingRad?: number;
+  label?: string;
+}
+
+export interface StartPositionValidationResult {
+  valid: boolean;
+  reason: string | null;
+  position: { x: number; z: number; y: number; floor: number; headingRad?: number };
+  routeReachable: boolean;
+  routeWaypointsCount: number;
+  clearanceMeters?: number;
 }
 
 export type FailureType =
@@ -641,6 +668,16 @@ export interface TrainingEpisodeRecord {
   failureCategory?: FailureCategory;
 }
 
+export interface CandidatePolicyTrainingMetricsSummary {
+  episodesCompleted: number;
+  successCount: number;
+  failureCount: number;
+  successRatePct: number;
+  meanReward: number;
+  safetyInterventions: number;
+  learnedStatesCount: number;
+}
+
 export interface CandidatePolicyState {
   id: string;
   name: string;
@@ -652,7 +689,11 @@ export interface CandidatePolicyState {
   trainedEnvironmentName?: string;
   isTrained: boolean;
   totalEpisodesTrained: number;
+  createdAt?: string | null;
   lastTrainedAt: string | null;
+  activatedAt?: string | null;
+  isActive?: boolean;
+  trainingMetricsSummary?: CandidatePolicyTrainingMetricsSummary;
   hyperparameters: QLearningHyperparameters;
   qTable: Record<string, Record<QLearningAction, number>>;
   perRobotQTables?: Record<string, Record<string, Record<QLearningAction, number>>>;
@@ -819,6 +860,8 @@ export interface ExperimentRecord {
   destinationName: string;
   originFloor?: number;
   destinationFloor?: number;
+  originCoordinates?: { x: number; z: number; y?: number; floor?: number; headingRad?: number };
+  destinationCoordinates?: { x: number; z: number; y?: number; floor?: number };
   status: 'Success' | 'Failed';
   durationSec: number;
   distanceMeters: number;
@@ -877,6 +920,8 @@ export interface LiveTelemetry {
   currentDestination: string;
   originFloor?: number;
   destinationFloor?: number;
+  originCoordinates?: { x: number; z: number; y?: number; floor?: number; headingRad?: number };
+  destinationCoordinates?: { x: number; z: number; y?: number; floor?: number };
   batteryLevelPct: number;
   currentSpeedMps: number;
   targetSpeedMps?: number;
