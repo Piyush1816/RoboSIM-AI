@@ -2,13 +2,16 @@ import {
   CAMPUS_ELEVATORS,
   CONSTRUCTION_ZONES,
   DELIVERY_LOCATIONS,
+  formatRobotHardwareSummary,
   ROBOT_UNITS,
 } from '../data/campusConfig';
+import { loadRobots } from '../storage/experimentStorage';
 import {
   AvoidanceHierarchyLevel,
   CampusElevatorConfig,
   CandidatePolicyState,
   ElevatorFaultMode,
+  ElevatorMachineState,
   ElevatorState,
   ElevatorUnitStatus,
   FailureType,
@@ -20,6 +23,7 @@ import {
   QLearningAction,
   QLearningObservation,
   RobotOperationalState,
+  RobotUnitConfig,
   ScenarioConfig,
   SimulationLogEntry,
   SimulationRunState,
@@ -70,6 +74,10 @@ export interface SimulationCompletionData {
   isCandidatePolicy?: boolean;
   originName: string;
   destinationName: string;
+  originFloor?: number;
+  destinationFloor?: number;
+  robotHardwareSummary?: string;
+  payloadKg?: number;
   status: 'Success' | 'Failed';
   durationSec: number;
   distanceMeters: number;
@@ -77,6 +85,7 @@ export interface SimulationCompletionData {
   replanCount: number;
   unnecessaryReplanCount: number;
   deadlockCount: number;
+  safetyInterventionCount?: number;
   episodeReward: number;
   decisionHistory: string[];
   robotStateBeforeCompletion: string;
@@ -136,6 +145,7 @@ interface PendingPredictionSample {
 export type ElevatorMissionPhase =
   | 'not-required'
   | 'approaching-building-entrance'
+  | 'calling-elevator-to-origin'
   | 'waiting-in-lobby'
   | 'doors-opening-ground'
   | 'boarding-cabin'
@@ -190,6 +200,8 @@ export class AutonomousNavigationController {
   public robotPos: Vector2D = { x: -15, z: -20, y: 0, floor: 0 };
   public robotAltitudeY = 0;
   public currentFloor = 0; // 0 = Ground Floor (G), 1 = First Floor (1F), 2 = Second Floor (2F)
+  public originFloor = 0;
+  public targetFloor = 0;
   public isRobotIndoor = false;
   public robotHeading = 0;
   public currentSpeedMps = 0;
@@ -201,6 +213,7 @@ export class AutonomousNavigationController {
   public elapsedTimeSec = 0;
   public collisionsCount = 0;
   public replanCount = 0;
+  public safetyInterventionCount = 0;
   public pedestrianDetectionsCount = 0;
   public totalWaitingTimeSec = 0;
 
@@ -242,6 +255,8 @@ export class AutonomousNavigationController {
   public activeElevatorId: string | null = null;
   public elevatorMissionPhase: ElevatorMissionPhase = 'not-required';
   public elevatorPhaseTimerSec = 0;
+  public elevatorCallStartFloor = 0;
+  public elevatorTransitStartFloor = 0;
   public elevatorWaitTimeSec = 0;
   public elevatorReroutedToBackup = false;
   public elevatorStateEncountered: ElevatorState = 'Available';
@@ -332,12 +347,23 @@ export class AutonomousNavigationController {
 
   public setElevatorFaultMode(
     faultMode: ElevatorFaultMode,
-    requiresElevator = true
+    requiresElevator?: boolean
   ): void {
     this.elevatorFaultModeOverride = faultMode;
+    const targetLoc = this.getTargetLocation();
+    const originLoc = this.getOriginLocation();
+    const oFloor = originLoc.floor ?? this.currentScenario.originFloor ?? 0;
+    const tFloor =
+      this.destinationOverrideId !== null
+        ? targetLoc.floor ?? 0
+        : targetLoc.floor !== undefined && targetLoc.floor > 0
+        ? targetLoc.floor
+        : this.currentScenario.destinationFloor ??
+          (requiresElevator ?? this.currentScenario.requiresElevator ? 2 : 0);
+
     this.currentScenario = {
       ...this.currentScenario,
-      requiresElevator,
+      requiresElevator: oFloor !== tFloor,
       elevatorFaultMode: faultMode,
     };
     this.reset(false);
@@ -355,8 +381,32 @@ export class AutonomousNavigationController {
     this.callbacks.onPathUpdated?.(this.getPathUpdateEvent());
   }
 
-  public getCurrentRobot() {
-    return ROBOT_UNITS.find((r) => r.id === this.currentRobotId) ?? ROBOT_UNITS[0];
+  public getCurrentRobot(): RobotUnitConfig {
+    if (this.customRobotOverride && this.customRobotOverride.id === this.currentRobotId) {
+      return this.customRobotOverride;
+    }
+    const allRobots = loadRobots();
+    return (
+      allRobots.find((r) => r.id === this.currentRobotId) ??
+      ROBOT_UNITS.find((r) => r.id === this.currentRobotId) ??
+      ROBOT_UNITS[0]
+    );
+  }
+
+  public customRobotOverride: RobotUnitConfig | null = null;
+  public activePayloadKg: number | null = null;
+
+  public setRobotHardwareConfig(robot: RobotUnitConfig): void {
+    this.customRobotOverride = robot;
+    this.currentRobotId = robot.id;
+    this.perceptionProfile = computePerceptionProfile(
+      this.currentScenario.sensorNoiseLevel,
+      robot
+    );
+  }
+
+  public setPayloadKg(payloadKg: number | null): void {
+    this.activePayloadKg = payloadKg;
   }
 
   public getOriginLocation() {
@@ -397,6 +447,53 @@ export class AutonomousNavigationController {
     return 'Second Floor (2F)';
   }
 
+  public getTargetDestinationRoomCoords(elevCfg: CampusElevatorConfig): Vector2D {
+    const targetLoc = this.getTargetLocation();
+    const fh = elevCfg.floorHeightM;
+    const destY = Number((this.targetFloor * fh).toFixed(2));
+    if (
+      targetLoc.isIndoor &&
+      targetLoc.buildingId === elevCfg.buildingId &&
+      (targetLoc.floor ?? 0) === this.targetFloor
+    ) {
+      return {
+        x: targetLoc.position[0],
+        z: targetLoc.position[2],
+        y: destY,
+        floor: this.targetFloor,
+      };
+    }
+    if (this.targetFloor === 1 && elevCfg.firstFloorRoomPos) {
+      return { ...elevCfg.firstFloorRoomPos, y: destY, floor: 1 };
+    }
+    if (this.targetFloor === 0) {
+      return {
+        x: targetLoc.position[0],
+        z: targetLoc.position[2],
+        y: 0,
+        floor: 0,
+      };
+    }
+    return { ...elevCfg.destinationRoomPos, y: destY, floor: this.targetFloor };
+  }
+
+  public getTargetDestinationRoomName(elevCfg: CampusElevatorConfig | null): string {
+    const targetLoc = this.getTargetLocation();
+    if (targetLoc.isIndoor && (targetLoc.floor ?? 0) === this.targetFloor) {
+      return targetLoc.name;
+    }
+    if (this.targetFloor === 0) {
+      return targetLoc.name;
+    }
+    if (elevCfg) {
+      if (this.targetFloor === 1 && elevCfg.firstFloorRoomName) {
+        return `${elevCfg.firstFloorRoomName} (${elevCfg.buildingName})`;
+      }
+      return `${elevCfg.destinationRoomName} (${elevCfg.buildingName})`;
+    }
+    return targetLoc.name;
+  }
+
   public setConfiguration(
     scenario: ScenarioConfig,
     policy: NavigationPolicyConfig,
@@ -431,8 +528,8 @@ export class AutonomousNavigationController {
 
   /**
    * Builds the full multi-layer route from current `startPos` to the target elevator's
-   * Ground Floor Indoor Lobby (`Outdoor A* -> Building Entrance -> Ground Internal Corridor -> Elevator Lobby`),
-   * plus visual preview waypoints up the shaft and along the Second Floor Corridor to the Destination Room.
+   * Indoor Lobby (`Outdoor A* -> Building Entrance -> Ground Internal Corridor -> Elevator Lobby`,
+   * or Upper-Floor Corridor -> Upper-Floor Elevator Lobby when `originFloor > 0`).
    */
   private computeMultiFloorApproachRoute(
     startPos: Vector2D,
@@ -440,6 +537,26 @@ export class AutonomousNavigationController {
     dynamicPedPositions: Vector2D[] = [],
     predictedPenaltyZones: PredictedGridPenaltyZone[] = []
   ): PathfindingDiagnosticsResult {
+    const startFloor = startPos.floor ?? this.originFloor;
+
+    // If starting on an upper floor (1F or 2F) inside the building, route directly along that floor's corridor to the elevator lobby
+    if (startFloor > 0) {
+      const upperToLobby = buildIndoorElevatorRouteWaypoints(
+        elevCfg,
+        'enter-to-lobby',
+        startFloor,
+        undefined,
+        startPos
+      );
+      return {
+        path: upperToLobby,
+        reachable: true,
+        detourActive: false,
+        blockedZonesOnDirectPath: [],
+        failureReason: null,
+      };
+    }
+
     // If robot is currently inside another building's ground corridor (e.g., rerouting from primary lobby to backup elevator),
     // first exit that building's front entrance back to its outdoor approach node before running outdoor A*.
     let outdoorStart: Vector2D = { x: startPos.x, z: startPos.z, y: 0, floor: 0 };
@@ -477,7 +594,8 @@ export class AutonomousNavigationController {
 
     const indoorToLobby = buildIndoorElevatorRouteWaypoints(
       elevCfg,
-      'enter-to-lobby'
+      'enter-to-lobby',
+      0
     );
     const combinedPath: Vector2D[] = [
       ...exitPrefix,
@@ -500,10 +618,9 @@ export class AutonomousNavigationController {
     const activeElev = this.getActiveElevatorUnit();
     const activeElevCfg = this.getActiveElevatorConfig();
 
-    const destinationLabel =
-      this.requiresElevator && activeElevCfg
-        ? `${activeElevCfg.destinationRoomName} (${activeElevCfg.buildingName})`
-        : `${target.name} (${target.code})`;
+    const destinationLabel = this.requiresElevator
+      ? this.getTargetDestinationRoomName(activeElevCfg)
+      : `${target.name} (${target.code})`;
 
     return {
       simulationState: this.runState,
@@ -513,6 +630,8 @@ export class AutonomousNavigationController {
       activeAvoidanceLevel: this.activeAvoidanceLevel,
       originName: origin.name,
       currentDestination: destinationLabel,
+      originFloor: this.originFloor,
+      destinationFloor: this.targetFloor,
       batteryLevelPct: Number(this.batteryPct.toFixed(1)),
       currentSpeedMps: Number(this.currentSpeedMps.toFixed(2)),
       targetSpeedMps: Number(this.targetSpeedMps.toFixed(2)),
@@ -522,6 +641,7 @@ export class AutonomousNavigationController {
       elapsedTimeSec: Number(this.elapsedTimeSec.toFixed(1)),
       collisionsCount: this.collisionsCount,
       replanCount: this.replanCount,
+      safetyInterventionCount: this.safetyInterventionCount,
       pedestrianDetectionsCount: this.pedestrianDetectionsCount,
       predictedEncountersCount: this.predictedEncountersCount,
       avoidedEncountersCount: this.avoidedEncountersCount,
@@ -550,6 +670,7 @@ export class AutonomousNavigationController {
       requiresElevator: this.requiresElevator,
       activeElevatorId: this.activeElevatorId,
       activeElevatorState: activeElev ? activeElev.state : null,
+      activeElevatorMachineState: activeElev?.machineState ?? null,
       elevatorState: activeElev ? activeElev.state : 'Available',
       currentFloor: this.currentFloor,
       currentFloorLabel: this.getFloorLabel(
@@ -615,6 +736,7 @@ export class AutonomousNavigationController {
     this.distanceTraveledM = 0;
     this.collisionsCount = 0;
     this.replanCount = 0;
+    this.safetyInterventionCount = 0;
     this.pedestrianDetectionsCount = 0;
     this.totalWaitingTimeSec = 0;
     this.initialBatteryPct = this.currentScenario.initialBatteryPct ?? 98.0;
@@ -682,24 +804,43 @@ export class AutonomousNavigationController {
     this.lastPredictionSampleTimeSec = 0;
     this.stopStartedWithoutClosePed = false;
 
-    // Initialize Part 2 Multi-Floor Indoor Elevator configuration
-    this.requiresElevator = Boolean(this.currentScenario.requiresElevator);
+    const originLoc = this.getOriginLocation();
+    const targetLoc = this.getTargetLocation();
+
+    // Destination-aware floor & elevator resolution:
+    // Only use an elevator when originFloor !== targetFloor!
+    this.originFloor = originLoc.floor ?? this.currentScenario.originFloor ?? 0;
+    if (this.destinationOverrideId !== null) {
+      this.targetFloor = targetLoc.floor ?? 0;
+    } else if (targetLoc.floor !== undefined && targetLoc.floor > 0) {
+      this.targetFloor = targetLoc.floor;
+    } else {
+      this.targetFloor =
+        this.currentScenario.destinationFloor ??
+        (this.currentScenario.requiresElevator ? 2 : targetLoc.floor ?? 0);
+    }
+
+    this.requiresElevator = this.originFloor !== this.targetFloor;
     this.elevatorFaultMode =
       this.elevatorFaultModeOverride ??
       this.currentScenario.elevatorFaultMode ??
       'none';
     this.elevatorTimeoutSec = this.currentScenario.elevatorTimeoutSec ?? 3.2;
     this.elevatorPhaseTimerSec = 0;
+    this.elevatorCallStartFloor = 0;
+    this.elevatorTransitStartFloor = this.originFloor;
     this.elevatorWaitTimeSec = 0;
     this.elevatorReroutedToBackup = false;
     this.elevatorStateEncountered = 'Available';
     this.elevatorEventsLog = [];
-    this.robotAltitudeY = 0;
-    this.currentFloor = 0;
-    this.isRobotIndoor = false;
+
+    this.currentFloor = this.originFloor;
+    this.robotAltitudeY = Number((this.originFloor * 3.6).toFixed(2));
+    this.isRobotIndoor = Boolean(originLoc.isIndoor || this.originFloor > 0);
 
     this.elevatorUnits = CAMPUS_ELEVATORS.map((cfg) => {
       let initialState: ElevatorState = 'Available';
+      let initialMachineState: ElevatorMachineState = 'IDLE';
       if (this.requiresElevator) {
         if (
           cfg.isPrimary &&
@@ -707,16 +848,19 @@ export class AutonomousNavigationController {
             this.elevatorFaultMode === 'no-alternative-available')
         ) {
           initialState = 'Out of Service';
+          initialMachineState = 'OUT_OF_SERVICE';
         } else if (
           !cfg.isPrimary &&
           this.elevatorFaultMode === 'no-alternative-available'
         ) {
           initialState = 'Out of Service';
+          initialMachineState = 'OUT_OF_SERVICE';
         } else if (
           cfg.isPrimary &&
           this.elevatorFaultMode === 'delayed-reassess'
         ) {
           initialState = 'Delayed';
+          initialMachineState = 'IDLE';
         }
       }
 
@@ -736,8 +880,9 @@ export class AutonomousNavigationController {
         doorwayFacing: cfg.doorwayFacing,
         doorOpenProgress: 0,
         state: initialState,
-        currentFloor: 0, // Starts at Ground Floor (0)
-        targetFloor: cfg.destinationFloor,
+        machineState: initialMachineState,
+        currentFloor: 0, // Cabin starts at Ground Floor (0) and travels to originFloor if called from 1F/2F
+        targetFloor: this.targetFloor,
         floorHeightM: cfg.floorHeightM,
         isPrimary: cfg.isPrimary,
         robotInside: false,
@@ -747,17 +892,15 @@ export class AutonomousNavigationController {
     });
 
     this.perceptionProfile = computePerceptionProfile(
-      this.currentScenario.sensorNoiseLevel
+      this.currentScenario.sensorNoiseLevel,
+      this.getCurrentRobot()
     );
-
-    const originLoc = this.getOriginLocation();
-    const targetLoc = this.getTargetLocation();
 
     this.robotPos = {
       x: originLoc.position[0],
       z: originLoc.position[2],
-      y: 0,
-      floor: 0,
+      y: this.robotAltitudeY,
+      floor: this.originFloor,
     };
 
     this.cachedStaticGrid = buildNavigationGrid(
@@ -767,16 +910,118 @@ export class AutonomousNavigationController {
     );
 
     if (this.requiresElevator && this.elevatorUnits.length > 0) {
-      const primaryCfg =
+      // Determine initial elevator to approach:
+      // - If starting on an upper floor (originFloor > 0), use the elevator of the origin building.
+      // - If testing primary lift fault ('unavailable-before-arrival', 'delayed-reassess', 'no-alternative-available'), approach Primary Lift A first so fault detection & backup rerouting are exercised.
+      // - Otherwise use the target location's building elevator if specified, or Primary Lift A.
+      let initialElevCfg =
         CAMPUS_ELEVATORS.find((e) => e.isPrimary) ?? CAMPUS_ELEVATORS[0];
-      this.activeElevatorId = primaryCfg.id;
+
+      if (this.originFloor > 0 && originLoc.elevatorId) {
+        initialElevCfg =
+          CAMPUS_ELEVATORS.find((e) => e.id === originLoc.elevatorId) ??
+          initialElevCfg;
+      } else if (
+        this.elevatorFaultMode === 'none' &&
+        targetLoc.elevatorId
+      ) {
+        initialElevCfg =
+          CAMPUS_ELEVATORS.find((e) => e.id === targetLoc.elevatorId) ??
+          initialElevCfg;
+      }
+
+      this.activeElevatorId = initialElevCfg.id;
       this.elevatorMissionPhase = 'approaching-building-entrance';
       this.pathDiagnostics = this.computeMultiFloorApproachRoute(
         this.robotPos,
-        primaryCfg,
+        initialElevCfg,
         []
       );
+    } else if (
+      this.originFloor === this.targetFloor &&
+      (originLoc.isIndoor || targetLoc.isIndoor)
+    ) {
+      // Same-floor destination involving an indoor location: NEVER use the elevator!
+      this.activeElevatorId = null;
+      this.elevatorMissionPhase = 'not-required';
+      const bldgElevCfg =
+        CAMPUS_ELEVATORS.find(
+          (e) =>
+            e.buildingId === originLoc.buildingId ||
+            e.buildingId === targetLoc.buildingId
+        ) ?? CAMPUS_ELEVATORS[0];
+
+      if (this.originFloor > 0 || (originLoc.isIndoor && targetLoc.isIndoor)) {
+        const sameFloorWps = buildIndoorElevatorRouteWaypoints(
+          bldgElevCfg,
+          'same-floor-indoor',
+          this.originFloor,
+          {
+            x: targetLoc.position[0],
+            z: targetLoc.position[2],
+            y: this.robotAltitudeY,
+            floor: this.targetFloor,
+          },
+          this.robotPos
+        );
+        this.pathDiagnostics = {
+          path: sameFloorWps,
+          reachable: true,
+          detourActive: false,
+          blockedZonesOnDirectPath: [],
+          failureReason: null,
+        };
+      } else if (!originLoc.isIndoor && targetLoc.isIndoor) {
+        // Outdoor Ground Floor -> Indoor Ground Floor Atrium (no elevator needed)
+        const outdoorDiag = computeAStarPathWithDiagnostics(
+          this.robotPos,
+          bldgElevCfg.outdoorApproachPos,
+          this.currentScenario.activeConstructionZones,
+          this.currentPolicy.constructionAvoidanceWeight,
+          []
+        );
+        const indoorGroundWps: Vector2D[] = [
+          { ...bldgElevCfg.entrancePos, y: 0, floor: 0 },
+          { x: bldgElevCfg.lobbyPos.x, z: targetLoc.position[2], y: 0, floor: 0 },
+          {
+            x: targetLoc.position[0],
+            z: targetLoc.position[2],
+            y: 0,
+            floor: 0,
+          },
+        ];
+        this.pathDiagnostics = {
+          ...outdoorDiag,
+          path: outdoorDiag.reachable
+            ? [
+                ...outdoorDiag.path.map((p) => ({ ...p, y: 0, floor: 0 })),
+                ...indoorGroundWps,
+              ]
+            : [],
+        };
+      } else {
+        // Indoor Ground Floor -> Outdoor Ground Floor
+        const outdoorDiag = computeAStarPathWithDiagnostics(
+          bldgElevCfg.outdoorApproachPos,
+          { x: targetLoc.position[0], z: targetLoc.position[2], y: 0, floor: 0 },
+          this.currentScenario.activeConstructionZones,
+          this.currentPolicy.constructionAvoidanceWeight,
+          []
+        );
+        this.pathDiagnostics = {
+          ...outdoorDiag,
+          path: outdoorDiag.reachable
+            ? [
+                { ...this.robotPos },
+                { x: bldgElevCfg.lobbyPos.x, z: this.robotPos.z, y: 0, floor: 0 },
+                { ...bldgElevCfg.entrancePos, y: 0, floor: 0 },
+                ...outdoorDiag.path.map((p) => ({ ...p, y: 0, floor: 0 })),
+              ]
+            : [],
+        };
+      }
     } else {
+      // Standard Outdoor Ground-to-Ground Navigation (Never uses elevator)
       this.activeElevatorId = null;
       this.elevatorMissionPhase = 'not-required';
       const initialGoalPos: Vector2D = {
@@ -814,9 +1059,13 @@ export class AutonomousNavigationController {
         'Route Blocked: No valid path to destination';
     } else if (this.requiresElevator) {
       const primaryElev = this.getActiveElevatorUnit();
-      this.navStatusText = `Ready at ${originLoc.code} → ${
-        primaryElev?.buildingName ?? 'Academic Building'
-      } Entrance & Lobby (${this.waypoints.length} nodes)`;
+      this.navStatusText = `Ready at ${originLoc.code} (F${this.originFloor}) → ${
+        primaryElev?.name ?? 'Elevator'
+      } → F${this.targetFloor} (${this.waypoints.length} nodes)`;
+    } else if (this.originFloor > 0 && this.originFloor === this.targetFloor) {
+      this.navStatusText = `Ready on ${this.getFloorLabel(
+        this.originFloor
+      )}: Same-floor indoor route (No Elevator Needed)`;
     } else if (this.pathDiagnostics.detourActive) {
       this.replanCount = 1;
       this.globalReplanCount = 1;
@@ -846,7 +1095,9 @@ export class AutonomousNavigationController {
       this.callbacks.onLogEvent?.(
         'info',
         this.pathDiagnostics.reachable
-          ? `Simulation reset to ${originLoc.name}. Computed ${this.waypoints.length} navigation nodes (Prediction horizon: ${this.predictionHorizonSec}s).`
+          ? `Simulation reset to ${originLoc.name} (Floor ${this.originFloor} → Floor ${this.targetFloor}, Elevator: ${
+              this.requiresElevator ? 'Required' : 'Not Used'
+            }).`
           : `Route check failed at ${originLoc.name}: ${this.pathDiagnostics.failureReason}`
       );
     }
@@ -915,9 +1166,18 @@ export class AutonomousNavigationController {
     this.robotOpState = 'Navigating';
     if (this.requiresElevator) {
       const elev = this.getActiveElevatorUnit();
-      this.navStatusText = `Approaching ${
-        elev?.buildingName ?? 'Building'
-      } Entrance → ${elev?.name ?? 'Elevator Lobby'}`;
+      this.navStatusText =
+        this.originFloor > 0
+          ? `Navigating ${this.getFloorLabel(this.originFloor)} Corridor → ${
+              elev?.name ?? 'Elevator Lobby'
+            }`
+          : `Approaching ${elev?.buildingName ?? 'Building'} Entrance → ${
+              elev?.name ?? 'Elevator Lobby'
+            }`;
+    } else if (this.originFloor > 0 && this.originFloor === this.targetFloor) {
+      this.navStatusText = `Same-Floor Indoor Navigation on ${this.getFloorLabel(
+        this.originFloor
+      )} (No Elevator)`;
     } else if (this.pathDiagnostics.detourActive) {
       const zones = this.pathDiagnostics.blockedZonesOnDirectPath.join(', ');
       this.navStatusText = `Detouring around ${zones} (${this.waypoints.length} nodes)`;
@@ -931,14 +1191,13 @@ export class AutonomousNavigationController {
     this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
     this.callbacks.onLogEvent?.(
       'info',
-      `Dispatched ${this.getCurrentRobot().name} toward ${
+      `Dispatched ${this.getCurrentRobot().name} from ${
+        this.getOriginLocation().name
+      } (F${this.originFloor}) toward ${
         this.requiresElevator
-          ? this.getActiveElevatorConfig()?.destinationRoomName ??
-            this.getTargetLocation().name
+          ? this.getTargetDestinationRoomName(this.getActiveElevatorConfig())
           : this.getTargetLocation().name
-      } (Prediction Horizon: ${this.predictionHorizonSec}s, Visibility: ${
-        this.perceptionProfile.visibilityRangeM
-      }m).`
+      } (F${this.targetFloor}).`
     );
   }
 
@@ -1013,7 +1272,12 @@ export class AutonomousNavigationController {
       if (elevCfg) return { ...elevCfg.outdoorApproachPos };
     }
     const targetLoc = this.getTargetLocation();
-    return { x: targetLoc.position[0], z: targetLoc.position[2], y: 0, floor: 0 };
+    return {
+      x: targetLoc.position[0],
+      z: targetLoc.position[2],
+      y: this.targetFloor * 3.6,
+      floor: this.targetFloor,
+    };
   }
 
   /**
@@ -1197,19 +1461,38 @@ export class AutonomousNavigationController {
   /**
    * Reroutes the robot from the primary building elevator lobby/entrance to the
    * backup building's indoor elevator lobby when the primary elevator is Out of Service
-   * before boarding (Test 6) or Delayed beyond timeout (Test 8).
+   * before boarding (Case 6) or Delayed beyond timeout.
    */
   private attemptRerouteToBackupElevator(reasonLabel: string): boolean {
-    const backupElev = this.elevatorUnits.find(
-      (e) => !e.isPrimary && e.state !== 'Out of Service' && e.state !== 'Stuck'
-    );
+    const currentElev = this.getActiveElevatorUnit();
+    if (currentElev) {
+      currentElev.machineState = 'OUT_OF_SERVICE';
+    }
+
+    const backupElev =
+      this.originFloor === 0
+        ? this.elevatorUnits.find(
+            (e) =>
+              !e.isPrimary &&
+              e.state !== 'Out of Service' &&
+              e.state !== 'Stuck' &&
+              e.machineState !== 'OUT_OF_SERVICE' &&
+              e.machineState !== 'STUCK'
+          )
+        : undefined;
     const backupCfg = CAMPUS_ELEVATORS.find((e) => e.id === backupElev?.id);
 
     if (!backupElev || !backupCfg) {
-      // Test 9: No alternative elevator available!
-      const failMsg = `Elevator Unavailable: ${reasonLabel}, and backup lift is Out of Service. Ground delivery robot cannot use stairs to reach ${
-        this.getActiveElevatorConfig()?.destinationRoomName ?? 'Second Floor'
-      }.`;
+      // Case 7: Both elevators unavailable (or robot is on upper floor of a building whose elevator is out of service)
+      const destLabel = this.getTargetDestinationRoomName(
+        this.getActiveElevatorConfig()
+      );
+      const failMsg =
+        this.originFloor > 0
+          ? `Elevator Unavailable: ${reasonLabel}. Robot is on ${this.getFloorLabel(
+              this.originFloor
+            )} and cannot use stairs to reach ${destLabel}.`
+          : `Elevator Unavailable: ${reasonLabel}, and backup lift is Out of Service. Ground delivery robot cannot use stairs to reach ${destLabel}.`;
       this.elevatorEventsLog.push(failMsg);
       this.runState = 'failed';
       this.currentSpeedMps = 0;
@@ -1289,43 +1572,67 @@ export class AutonomousNavigationController {
   }
 
   /**
-   * PART 2: MULTI-FLOOR INDOOR BUILDING & ELEVATOR STATE MACHINE
-   * Route sequence:
-   * Outdoor campus pathway -> Building entrance -> Internal corridor -> Elevator lobby ->
-   * Single elevator doorway -> Elevator cabin -> Destination floor ->
-   * Elevator doorway -> Internal corridor -> Destination room.
+   * PART 2: MULTI-FLOOR INDOOR BUILDING & 10-STATE ELEVATOR STATE MACHINE
+   * Explicit 10 states:
+   * 1. IDLE
+   * 2. DOORS_OPENING
+   * 3. BOARDING
+   * 4. DOORS_CLOSING
+   * 5. MOVING_UP
+   * 6. MOVING_DOWN
+   * 7. DOORS_OPENING_AT_DESTINATION
+   * 8. EXITING
+   * 9. OUT_OF_SERVICE
+   * 10. STUCK
    *
+   * Supports Ground (0), First (1), and Second (2) floors in both upward and downward directions.
    * Returns `true` when the robot is stationary inside the lobby or cabin waiting for doors/lift motion,
    * or `false` when the robot should physically drive along `this.waypoints`.
    */
   private stepElevatorStateMachine(subDt: number): boolean {
+    const activeElev = this.getActiveElevatorUnit();
+    const elevCfg = this.getActiveElevatorConfig();
+
     if (!this.requiresElevator || this.elevatorMissionPhase === 'not-required') {
-      this.isRobotIndoor = false;
-      this.robotAltitudeY = 0;
-      this.currentFloor = 0;
+      const originLoc = this.getOriginLocation();
+      const targetLoc = this.getTargetLocation();
+      const fh = elevCfg?.floorHeightM ?? 3.6;
+      this.currentFloor = this.originFloor;
+      this.robotAltitudeY = Number((this.originFloor * fh).toFixed(2));
+      this.isRobotIndoor = Boolean(
+        originLoc.isIndoor || targetLoc.isIndoor || this.originFloor > 0
+      );
       return false;
     }
 
-    const activeElev = this.getActiveElevatorUnit();
-    const elevCfg = this.getActiveElevatorConfig();
     if (!activeElev || !elevCfg) return false;
+    const fh = elevCfg.floorHeightM;
+    const originY = Number((this.originFloor * fh).toFixed(2));
+    const destY = Number((this.targetFloor * fh).toFixed(2));
 
     // Check if robot is currently inside the building footprint
-    const inGroundCorridor =
-      Math.abs(this.robotPos.x - elevCfg.cabinPos.x) <= 2.2 &&
-      this.robotPos.z <= elevCfg.entrancePos.z + 0.3 &&
-      this.robotPos.z >= elevCfg.cabinPos.z - 1.5;
+    const inBuildingCorridor =
+      Math.abs(this.robotPos.x - elevCfg.cabinPos.x) <= 7.5 &&
+      this.robotPos.z <= elevCfg.entrancePos.z + 0.35 &&
+      this.robotPos.z >= elevCfg.cabinPos.z - 2.2;
     this.isRobotIndoor =
-      inGroundCorridor ||
+      inBuildingCorridor ||
       this.currentFloor > 0 ||
+      this.elevatorMissionPhase === 'calling-elevator-to-origin' ||
       this.elevatorMissionPhase === 'boarding-cabin' ||
       this.elevatorMissionPhase === 'doors-closing-ground' ||
       this.elevatorMissionPhase === 'in-elevator-transit' ||
       this.elevatorMissionPhase === 'doors-opening-upper' ||
-      this.elevatorMissionPhase === 'exiting-to-destination';
+      (this.elevatorMissionPhase === 'exiting-to-destination' &&
+        this.robotPos.z <= elevCfg.entrancePos.z + 0.35);
 
-    // 1. Approaching Building Entrance -> Internal Corridor -> Ground Floor Elevator Lobby
+    // 1. Approaching Building Entrance / Indoor Corridor -> Origin Floor Elevator Lobby
     if (this.elevatorMissionPhase === 'approaching-building-entrance') {
+      this.currentFloor = this.originFloor;
+      this.robotAltitudeY = originY;
+      this.robotPos.y = originY;
+      this.robotPos.floor = this.originFloor;
+
       const distToEntrance = Math.hypot(
         elevCfg.entrancePos.x - this.robotPos.x,
         elevCfg.entrancePos.z - this.robotPos.z
@@ -1335,19 +1642,25 @@ export class AutonomousNavigationController {
         elevCfg.lobbyPos.z - this.robotPos.z
       );
 
-      // Update status when entering building front entrance
-      if (inGroundCorridor && this.robotOpState === 'Navigating') {
+      // Update status when entering building front entrance on Ground Floor
+      if (
+        this.originFloor === 0 &&
+        inBuildingCorridor &&
+        this.robotOpState === 'Navigating'
+      ) {
         this.robotOpState = 'Entering Building';
         this.navStatusText = `Inside ${elevCfg.buildingName}: Ground Corridor → ${activeElev.name} Lobby`;
         this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
       }
 
-      // Check if primary elevator is Out of Service as robot approaches building entrance or lobby (Test 6 & Test 9)
+      // Check if primary elevator is Out of Service as robot approaches building entrance or lobby (Case 6 & Case 7)
       if (
-        activeElev.state === 'Out of Service' &&
+        (activeElev.state === 'Out of Service' ||
+          activeElev.machineState === 'OUT_OF_SERVICE') &&
         (distToEntrance <= 4.5 || distToLobby <= 6.5)
       ) {
         this.elevatorStateEncountered = 'Out of Service';
+        activeElev.machineState = 'OUT_OF_SERVICE';
         this.attemptRerouteToBackupElevator(
           `${activeElev.name} in ${elevCfg.buildingName} is Out of Service before boarding`
         );
@@ -1356,19 +1669,29 @@ export class AutonomousNavigationController {
 
       if (distToLobby <= 4.5 && activeElev.state === 'Available') {
         activeElev.state = 'Approaching';
+        activeElev.machineState = 'IDLE';
       }
 
-      // Check arrival at Ground Floor Elevator Lobby directly in front of the single doorway
-      if (distToLobby <= 0.38) {
-        this.robotPos = { ...elevCfg.lobbyPos, y: 0, floor: 0 };
+      // Check arrival at Origin Floor Elevator Lobby directly in front of the single doorway
+      if (distToLobby <= 0.55) {
+        this.robotPos = {
+          ...elevCfg.lobbyPos,
+          y: originY,
+          floor: this.originFloor,
+        };
         this.currentSpeedMps = 0;
         this.elevatorPhaseTimerSec = 0;
 
         if (activeElev.state === 'Delayed') {
           this.elevatorStateEncountered = 'Delayed';
+          activeElev.machineState = 'IDLE';
           this.elevatorMissionPhase = 'waiting-in-lobby';
           this.robotOpState = 'Waiting for Elevator';
-          const msg = `Arrived at ${elevCfg.buildingName} Ground Lobby: ${activeElev.name} is Delayed. Waiting up to ${this.elevatorTimeoutSec.toFixed(
+          const msg = `Arrived at ${elevCfg.buildingName} ${this.getFloorLabel(
+            this.originFloor
+          )} Lobby: ${
+            activeElev.name
+          } is Delayed. Waiting up to ${this.elevatorTimeoutSec.toFixed(
             1
           )}s before reassessing.`;
           this.elevatorEventsLog.push(msg);
@@ -1378,14 +1701,40 @@ export class AutonomousNavigationController {
           return true;
         }
 
-        // Start opening the single elevator doorway facing the lobby
+        // If the cabin is not yet at originFloor (e.g., origin is 1F or 2F and cabin is at Ground), call cabin to originFloor first!
+        if (Math.abs(activeElev.currentFloor - this.originFloor) > 0.05) {
+          this.elevatorCallStartFloor = activeElev.currentFloor;
+          const callingUp = this.originFloor > activeElev.currentFloor;
+          activeElev.state = callingUp ? 'Moving Up' : 'Moving Down';
+          activeElev.machineState = callingUp ? 'MOVING_UP' : 'MOVING_DOWN';
+          activeElev.doorOpenProgress = 0;
+          this.elevatorMissionPhase = 'calling-elevator-to-origin';
+          this.robotOpState = 'Waiting for Elevator';
+          const callMsg = `Calling ${activeElev.name} cabin to ${this.getFloorLabel(
+            this.originFloor
+          )} Lobby.`;
+          this.elevatorEventsLog.push(callMsg);
+          this.navStatusText = `${activeElev.name}: Calling Cabin to ${this.getFloorLabel(
+            this.originFloor
+          )}`;
+          this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
+          this.callbacks.onLogEvent?.('info', callMsg);
+          return true;
+        }
+
+        // Start opening the single elevator doorway on originFloor
         activeElev.state = 'Doors Opening';
+        activeElev.machineState = 'DOORS_OPENING';
         activeElev.doorOpenProgress = 0.05;
         this.elevatorMissionPhase = 'doors-opening-ground';
         this.robotOpState = 'Waiting for Elevator';
-        const msg = `Arrived at ${elevCfg.buildingName} Ground Lobby: ${activeElev.name} single doorway opening.`;
+        const msg = `Arrived at ${elevCfg.buildingName} ${this.getFloorLabel(
+          this.originFloor
+        )} Lobby: ${activeElev.name} single doorway opening [DOORS_OPENING].`;
         this.elevatorEventsLog.push(msg);
-        this.navStatusText = `${activeElev.name}: Doors Opening at Ground Lobby`;
+        this.navStatusText = `${activeElev.name}: Doors Opening at ${this.getFloorLabel(
+          this.originFloor
+        )} Lobby`;
         this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
         this.callbacks.onLogEvent?.('info', msg);
         return true;
@@ -1394,12 +1743,43 @@ export class AutonomousNavigationController {
       return false;
     }
 
-    // 2. Waiting in Indoor Lobby for Delayed Elevator (Test 8)
+    // 1b. Calling Elevator Cabin to Origin Floor (when robot starts on 1F or 2F and calls lift)
+    if (this.elevatorMissionPhase === 'calling-elevator-to-origin') {
+      this.currentSpeedMps = 0;
+      this.elevatorPhaseTimerSec += subDt;
+      this.elevatorWaitTimeSec += subDt;
+      const callDurationSec = 0.85;
+      const progress = Math.min(1, this.elevatorPhaseTimerSec / callDurationSec);
+      const currentContFloor =
+        this.elevatorCallStartFloor +
+        (this.originFloor - this.elevatorCallStartFloor) * progress;
+      activeElev.currentFloor = Number(currentContFloor.toFixed(2));
+      const callingUp = this.originFloor >= this.elevatorCallStartFloor;
+      activeElev.state = callingUp ? 'Moving Up' : 'Moving Down';
+      activeElev.machineState = callingUp ? 'MOVING_UP' : 'MOVING_DOWN';
+
+      if (progress >= 1) {
+        activeElev.currentFloor = this.originFloor;
+        activeElev.state = 'Doors Opening';
+        activeElev.machineState = 'DOORS_OPENING';
+        activeElev.doorOpenProgress = 0.05;
+        this.elevatorPhaseTimerSec = 0;
+        this.elevatorMissionPhase = 'doors-opening-ground';
+        this.navStatusText = `${activeElev.name}: Doors Opening at ${this.getFloorLabel(
+          this.originFloor
+        )} Lobby`;
+        this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
+      }
+      return true;
+    }
+
+    // 2. Waiting in Indoor Lobby for Delayed Elevator
     if (this.elevatorMissionPhase === 'waiting-in-lobby') {
       this.currentSpeedMps = 0;
       this.totalWaitingTimeSec += subDt;
       this.elevatorWaitTimeSec += subDt;
       activeElev.waitElapsedSec += subDt;
+      activeElev.machineState = 'IDLE';
 
       this.navStatusText = `Indoor Lobby Wait: ${activeElev.name} (${activeElev.waitElapsedSec.toFixed(
         1
@@ -1416,33 +1796,39 @@ export class AutonomousNavigationController {
       return true;
     }
 
-    // 3. Doors Opening at Ground Floor Lobby
+    // 3. DOORS_OPENING at Origin Floor Lobby
     if (this.elevatorMissionPhase === 'doors-opening-ground') {
       this.currentSpeedMps = 0;
       this.elevatorPhaseTimerSec += subDt;
       this.elevatorWaitTimeSec += subDt * 0.5;
       activeElev.state = 'Doors Opening';
+      activeElev.machineState = 'DOORS_OPENING';
+      activeElev.currentFloor = this.originFloor;
       activeElev.doorOpenProgress = Math.min(
         1,
         this.elevatorPhaseTimerSec / 0.65
       );
-      this.navStatusText = `${activeElev.name}: Single Doorway Opening (${Math.round(
-        activeElev.doorOpenProgress * 100
-      )}%)`;
+      this.navStatusText = `${activeElev.name}: Doorway Opening on ${this.getFloorLabel(
+        this.originFloor
+      )} (${Math.round(activeElev.doorOpenProgress * 100)}%)`;
 
       if (activeElev.doorOpenProgress >= 1) {
-        // Doorway is fully open and cabin is at Ground Floor (0)!
+        // Doorway is fully open and cabin is at originFloor!
         // Unlock the single doorway edge: Lobby -> Single Doorway -> Cabin
         activeElev.state = 'Boarding';
+        activeElev.machineState = 'BOARDING';
         this.elevatorPhaseTimerSec = 0;
         this.elevatorMissionPhase = 'boarding-cabin';
         this.robotOpState = 'Boarding Elevator';
         this.waypoints = buildIndoorElevatorRouteWaypoints(
           elevCfg,
-          'board-cabin'
+          'board-cabin',
+          this.originFloor
         );
         this.currentWaypointIdx = 1;
-        this.navStatusText = `Boarding ${activeElev.name} Cabin via Single South Doorway`;
+        this.navStatusText = `Boarding ${activeElev.name} Cabin on ${this.getFloorLabel(
+          this.originFloor
+        )} [BOARDING]`;
         this.emitPathUpdate();
         this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
         return false; // Let robot physically drive through the single doorway into cabinPos!
@@ -1450,25 +1836,38 @@ export class AutonomousNavigationController {
       return true;
     }
 
-    // 4. Robot Physically Driving Through Single Doorway Into Elevator Cabin
+    // 4. BOARDING: Robot Physically Driving Through Single Doorway Into Elevator Cabin
     if (this.elevatorMissionPhase === 'boarding-cabin') {
       activeElev.state = 'Boarding';
+      activeElev.machineState = 'BOARDING';
       activeElev.doorOpenProgress = 1;
+      this.currentFloor = this.originFloor;
+      this.robotAltitudeY = originY;
+      this.robotPos.y = originY;
+      this.robotPos.floor = this.originFloor;
+
       const distToCabin = Math.hypot(
         elevCfg.cabinPos.x - this.robotPos.x,
         elevCfg.cabinPos.z - this.robotPos.z
       );
 
-      if (distToCabin <= 0.26) {
-        this.robotPos = { ...elevCfg.cabinPos, y: 0, floor: 0 };
+      if (distToCabin <= 0.55) {
+        this.robotPos = {
+          ...elevCfg.cabinPos,
+          y: originY,
+          floor: this.originFloor,
+        };
         this.currentSpeedMps = 0;
         // Turn robot to face the South doorway (heading = 0) while inside the cabin
         this.robotHeading = 0;
         activeElev.robotInside = true;
         activeElev.state = 'Doors Closing';
+        activeElev.machineState = 'DOORS_CLOSING';
         this.elevatorPhaseTimerSec = 0;
         this.elevatorMissionPhase = 'doors-closing-ground';
-        const msg = `Boarded ${activeElev.name} cabin via single doorway. Doors Closing.`;
+        const msg = `Boarded ${activeElev.name} cabin on ${this.getFloorLabel(
+          this.originFloor
+        )}. Doors Closing [DOORS_CLOSING].`;
         this.elevatorEventsLog.push(msg);
         this.navStatusText = `${activeElev.name}: Inside Cabin — Doors Closing`;
         this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
@@ -1478,11 +1877,12 @@ export class AutonomousNavigationController {
       return false;
     }
 
-    // 5. Doors Closing on Ground Floor before Vertical Lift
+    // 5. DOORS_CLOSING on Origin Floor before Vertical Lift
     if (this.elevatorMissionPhase === 'doors-closing-ground') {
       this.currentSpeedMps = 0;
       this.elevatorPhaseTimerSec += subDt;
       activeElev.state = 'Doors Closing';
+      activeElev.machineState = 'DOORS_CLOSING';
       activeElev.doorOpenProgress = Math.max(
         0,
         1 - this.elevatorPhaseTimerSec / 0.55
@@ -1490,50 +1890,67 @@ export class AutonomousNavigationController {
 
       if (activeElev.doorOpenProgress <= 0) {
         activeElev.doorOpenProgress = 0;
-        activeElev.state = 'Moving';
+        this.elevatorTransitStartFloor = this.originFloor;
+        const movingUp = this.targetFloor >= this.originFloor;
+        activeElev.state = movingUp ? 'Moving Up' : 'Moving Down';
+        activeElev.machineState = movingUp ? 'MOVING_UP' : 'MOVING_DOWN';
         this.elevatorPhaseTimerSec = 0;
         this.elevatorMissionPhase = 'in-elevator-transit';
         this.robotOpState = 'In Elevator Transit';
-        const msg = `${activeElev.name} Doors Closed — Ascending shaft from Ground Floor (G) through 1F to Second Floor (2F).`;
+        const dirWord = movingUp ? 'Ascending' : 'Descending';
+        const msg = `${activeElev.name} Doors Closed — ${dirWord} shaft from ${this.getFloorLabel(
+          this.originFloor
+        )} to ${this.getFloorLabel(this.targetFloor)} [${
+          activeElev.machineState
+        }].`;
         this.elevatorEventsLog.push(msg);
-        this.navStatusText = `In Elevator Transit: Ground (G) → Second Floor (2F)`;
+        this.navStatusText = `In Elevator Transit: ${this.getFloorLabel(
+          this.originFloor
+        )} → ${this.getFloorLabel(this.targetFloor)}`;
         this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
         this.callbacks.onLogEvent?.('info', msg);
       }
       return true;
     }
 
-    // 6. Vertical Cabin Movement Inside Enclosed Shaft (Ground Floor 0 -> First Floor 1 -> Second Floor 2)
+    // 6. MOVING_UP / MOVING_DOWN / STUCK: Vertical Cabin Movement Inside Enclosed Shaft
     if (this.elevatorMissionPhase === 'in-elevator-transit') {
       this.currentSpeedMps = 0;
       this.elevatorPhaseTimerSec += subDt;
-      const totalClimbTimeSec = 2.0;
+      const floorSpan = Math.max(
+        1,
+        Math.abs(this.targetFloor - this.elevatorTransitStartFloor)
+      );
+      const totalClimbTimeSec = Math.max(1.25, floorSpan * 1.1);
       const progress = Math.min(1, this.elevatorPhaseTimerSec / totalClimbTimeSec);
-      const currentContFloor = progress * elevCfg.destinationFloor;
+      const currentContFloor =
+        this.elevatorTransitStartFloor +
+        (this.targetFloor - this.elevatorTransitStartFloor) * progress;
+      const movingUp = this.targetFloor >= this.elevatorTransitStartFloor;
 
-      // Test 7: Elevator becomes Stuck between First Floor (1.0) and Second Floor (2.0)!
+      // Case 8: Elevator becomes STUCK between floors during vertical transit!
       if (
         this.elevatorFaultMode === 'stuck-during-journey' &&
-        currentContFloor >= 1.35
+        progress >= 0.65
       ) {
+        const stuckFloorVal = Number(currentContFloor.toFixed(2));
         activeElev.state = 'Stuck';
-        activeElev.currentFloor = 1.35;
+        activeElev.machineState = 'STUCK';
+        activeElev.currentFloor = stuckFloorVal;
         activeElev.doorOpenProgress = 0; // Doors remain strictly closed when stuck between floors!
         activeElev.assistanceRequested = true;
-        this.currentFloor = 1;
-        this.robotAltitudeY = Number(
-          (activeElev.currentFloor * elevCfg.floorHeightM).toFixed(2)
-        );
+        this.currentFloor = Math.round(stuckFloorVal);
+        this.robotAltitudeY = Number((stuckFloorVal * fh).toFixed(2));
         this.robotPos = {
           ...elevCfg.cabinPos,
           y: this.robotAltitudeY,
-          floor: 1,
+          floor: this.currentFloor,
         };
         this.elevatorStateEncountered = 'Stuck';
         this.elevatorMissionPhase = 'failed-in-elevator';
         this.robotOpState = 'Awaiting Assistance';
 
-        const stuckMsg = `CRITICAL: ${activeElev.name} cabin halted mid-shaft between 1st Floor and 2nd Floor (y=${this.robotAltitudeY}m) with doors closed and ${
+        const stuckMsg = `CRITICAL: ${activeElev.name} cabin halted mid-shaft at Floor ${stuckFloorVal} (y=${this.robotAltitudeY}m) [STUCK] with doors closed and ${
           this.getCurrentRobot().name
         } aboard!`;
         this.elevatorEventsLog.push(stuckMsg);
@@ -1542,7 +1959,7 @@ export class AutonomousNavigationController {
         activeElev.state = 'Emergency Assistance';
         const assistMsg = `Emergency Assistance requested in ${elevCfg.buildingName}. Cabin doors locked safe; operator dashboard alerted.`;
         this.elevatorEventsLog.push(assistMsg);
-        this.navStatusText = `Emergency Assistance: Cabin Stuck Between 1F & 2F (Doors Closed)`;
+        this.navStatusText = `Emergency Assistance: Cabin Stuck Mid-Shaft (y=${this.robotAltitudeY}m, Doors Closed)`;
         this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
         this.callbacks.onLogEvent?.('error', assistMsg);
 
@@ -1590,18 +2007,20 @@ export class AutonomousNavigationController {
       }
 
       if (progress < 1) {
-        activeElev.state = 'Moving';
+        activeElev.state = movingUp ? 'Moving Up' : 'Moving Down';
+        activeElev.machineState = movingUp ? 'MOVING_UP' : 'MOVING_DOWN';
         activeElev.currentFloor = Number(currentContFloor.toFixed(2));
         this.currentFloor = Math.round(activeElev.currentFloor);
         this.robotAltitudeY = Number(
-          (activeElev.currentFloor * elevCfg.floorHeightM).toFixed(2)
+          (activeElev.currentFloor * fh).toFixed(2)
         );
+        // Robot position stays synchronized inside the elevator cabin as it moves vertically
         this.robotPos = {
           ...elevCfg.cabinPos,
           y: this.robotAltitudeY,
           floor: this.currentFloor,
         };
-        this.navStatusText = `In Elevator Transit: ${
+        this.navStatusText = `In Elevator Transit [${activeElev.machineState}]: ${
           activeElev.name
         } (${this.getFloorLabel(activeElev.currentFloor)}, y=${
           this.robotAltitudeY
@@ -1609,33 +2028,34 @@ export class AutonomousNavigationController {
         return true;
       }
 
-      // Reached Destination Floor (Second Floor, Floor 2, y = 7.2m) -> Open Single Doorway
-      activeElev.currentFloor = elevCfg.destinationFloor;
-      this.currentFloor = elevCfg.destinationFloor;
-      this.robotAltitudeY = Number(
-        (elevCfg.destinationFloor * elevCfg.floorHeightM).toFixed(2)
-      );
+      // Reached Destination Floor -> DOORS_OPENING_AT_DESTINATION
+      activeElev.currentFloor = this.targetFloor;
+      this.currentFloor = this.targetFloor;
+      this.robotAltitudeY = destY;
       this.robotPos = {
         ...elevCfg.cabinPos,
-        y: this.robotAltitudeY,
-        floor: this.currentFloor,
+        y: destY,
+        floor: this.targetFloor,
       };
-      activeElev.state = 'Doors Opening';
+      activeElev.state = 'Doors Opening at Destination';
+      activeElev.machineState = 'DOORS_OPENING_AT_DESTINATION';
       this.elevatorPhaseTimerSec = 0;
       this.elevatorMissionPhase = 'doors-opening-upper';
       this.robotOpState = 'Exiting Elevator';
       this.navStatusText = `Arrived at ${this.getFloorLabel(
-        this.currentFloor
-      )} — Doors Opening`;
+        this.targetFloor
+      )} — Doors Opening [DOORS_OPENING_AT_DESTINATION]`;
       this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
       return true;
     }
 
-    // 7. Doors Opening on Destination Floor (Second Floor, y = 7.2m)
+    // 7. DOORS_OPENING_AT_DESTINATION on Target Floor (Floor 0, 1, or 2)
     if (this.elevatorMissionPhase === 'doors-opening-upper') {
       this.currentSpeedMps = 0;
       this.elevatorPhaseTimerSec += subDt;
-      activeElev.state = 'Doors Opening';
+      activeElev.state = 'Doors Opening at Destination';
+      activeElev.machineState = 'DOORS_OPENING_AT_DESTINATION';
+      activeElev.currentFloor = this.targetFloor;
       activeElev.doorOpenProgress = Math.min(
         1,
         this.elevatorPhaseTimerSec / 0.55
@@ -1644,18 +2064,51 @@ export class AutonomousNavigationController {
       if (activeElev.doorOpenProgress >= 1) {
         activeElev.doorOpenProgress = 1;
         activeElev.state = 'Exiting';
+        activeElev.machineState = 'EXITING';
         activeElev.robotInside = false;
         if (this.elevatorStateEncountered === 'Available') {
-          this.elevatorStateEncountered = 'Moving';
+          this.elevatorStateEncountered =
+            this.targetFloor >= this.originFloor ? 'Moving Up' : 'Moving Down';
         }
         this.elevatorMissionPhase = 'exiting-to-destination';
         this.robotOpState = 'Exiting Elevator';
 
-        // Build Upper Floor Indoor Route: Cabin -> Single South Doorway -> Upper Lobby -> Upper Corridor -> Destination Room
-        this.waypoints = buildIndoorElevatorRouteWaypoints(
-          elevCfg,
-          'exit-to-destination'
-        );
+        const targetLoc = this.getTargetLocation();
+        const destRoomCoords = this.getTargetDestinationRoomCoords(elevCfg);
+        const destRoomName = this.getTargetDestinationRoomName(elevCfg);
+
+        // Build Exit Route on targetFloor:
+        // If targetFloor === 0 and destination is outdoors (e.g. Case 3: 2F -> Ground outdoor dock),
+        // exit building lobby to outdoorApproachPos and append outdoor A* route!
+        if (this.targetFloor === 0 && !targetLoc.isIndoor) {
+          const indoorExitWps = buildIndoorElevatorRouteWaypoints(
+            elevCfg,
+            'exit-to-destination',
+            0
+          );
+          const outdoorCont = computeAStarPathWithDiagnostics(
+            elevCfg.outdoorApproachPos,
+            { x: targetLoc.position[0], z: targetLoc.position[2], y: 0, floor: 0 },
+            this.currentScenario.activeConstructionZones,
+            this.currentPolicy.safetyClearanceM +
+              this.perceptionProfile.uncertaintySafetyBufferM,
+            []
+          );
+          const groundOutdoorWps = outdoorCont.path.map((pt: Vector2D) => ({
+            ...pt,
+            y: 0,
+            floor: 0,
+          }));
+          this.waypoints = [...indoorExitWps, ...groundOutdoorWps.slice(1)];
+        } else {
+          this.waypoints = buildIndoorElevatorRouteWaypoints(
+            elevCfg,
+            'exit-to-destination',
+            this.targetFloor,
+            destRoomCoords
+          );
+        }
+
         this.currentWaypointIdx = 1;
         this.pathDiagnostics = {
           path: this.waypoints,
@@ -1666,38 +2119,40 @@ export class AutonomousNavigationController {
         };
 
         const exitMsg = `${activeElev.name} arrived at ${this.getFloorLabel(
-          this.currentFloor
-        )} (y=${this.robotAltitudeY}m). Exiting single doorway to ${
-          elevCfg.destinationRoomName
-        }.`;
+          this.targetFloor
+        )} (y=${destY}m). Exiting doorway [EXITING] toward ${destRoomName}.`;
         this.elevatorEventsLog.push(exitMsg);
-        this.navStatusText = `2F Indoor Corridor → ${elevCfg.destinationRoomName}`;
+        this.navStatusText = `${this.getFloorLabel(
+          this.targetFloor
+        )} Exit → ${destRoomName}`;
         this.emitPathUpdate();
         this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
         this.callbacks.onLogEvent?.('success', exitMsg);
-        return false; // Let robot physically drive out the single doorway along the 2F corridor!
+        return false; // Let robot physically drive out the doorway along the target floor!
       }
       return true;
     }
 
-    // 8. Robot Driving Along Second Floor Internal Corridor to Destination Room
+    // 8. EXITING -> Robot Driving Along Destination Floor to Final Room or Outdoor Goal
     if (this.elevatorMissionPhase === 'exiting-to-destination') {
-      const destY = elevCfg.destinationFloor * elevCfg.floorHeightM;
       this.robotAltitudeY = destY;
-      this.currentFloor = elevCfg.destinationFloor;
+      this.currentFloor = this.targetFloor;
       this.robotPos.y = destY;
-      this.robotPos.floor = elevCfg.destinationFloor;
+      this.robotPos.floor = this.targetFloor;
 
       const distFromCabin = Math.hypot(
         this.robotPos.x - elevCfg.cabinPos.x,
         this.robotPos.z - elevCfg.cabinPos.z
       );
-      if (distFromCabin > 2.45 && activeElev.state === 'Exiting') {
+      if (distFromCabin > 2.85 && activeElev.state === 'Exiting') {
         activeElev.state = 'Available';
+        activeElev.machineState = 'IDLE';
         activeElev.doorOpenProgress = 0;
         if (this.robotOpState === 'Exiting Elevator') {
           this.robotOpState = 'Navigating';
-          this.navStatusText = `Navigating 2F Corridor → ${elevCfg.destinationRoomName}`;
+          this.navStatusText = `Navigating ${this.getFloorLabel(
+            this.targetFloor
+          )} → ${this.getTargetDestinationRoomName(elevCfg)}`;
           this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
         }
       }
@@ -1740,12 +2195,25 @@ export class AutonomousNavigationController {
     }
 
     const bot = this.getCurrentRobot();
+    const effectivePayloadKg =
+      this.activePayloadKg ?? bot.defaultPayloadKg ?? Math.round(bot.payloadCapacityKg * 0.4);
+    const payloadRatio =
+      bot.payloadCapacityKg > 0
+        ? Math.min(1.4, effectivePayloadKg / bot.payloadCapacityKg)
+        : 0.4;
+    const payloadSpeedFactor = Math.max(
+      0.72,
+      1.0 - Math.max(0, payloadRatio - 0.35) * (bot.payloadSpeedPenaltyFactor ?? 0.12)
+    );
     const noiseCautionFactor = Math.max(
       0.72,
-      1.0 - this.currentScenario.sensorNoiseLevel * 0.45
+      1.0 -
+        this.currentScenario.sensorNoiseLevel *
+          (bot.hasRadar || bot.hasThermalCamera ? 0.32 : 0.45)
     );
     const nominalCruiseSpeed =
       bot.maxSpeedMps *
+      payloadSpeedFactor *
       this.currentPolicy.cruiseSpeedFactor *
       this.currentScenario.surfaceTraction *
       noiseCautionFactor;
@@ -1754,8 +2222,13 @@ export class AutonomousNavigationController {
       ? Math.min(nominalCruiseSpeed, 1.85) // Safe indoor corridor speed
       : nominalCruiseSpeed;
 
+    const robotFootprintClearanceAdder = Math.max(
+      -0.12,
+      (bot.collisionRadiusM ?? ROBOT_COLLISION_RADIUS) - ROBOT_COLLISION_RADIUS
+    );
     const effectivePolicyClearance =
       this.currentPolicy.safetyClearanceM +
+      robotFootprintClearanceAdder +
       this.perceptionProfile.uncertaintySafetyBufferM;
 
     // 3. Evaluate Predictive Trajectory Conflicts & Active Path Hazards (when on outdoor ground floor)
@@ -1888,6 +2361,15 @@ export class AutonomousNavigationController {
         (conflictPed && conflictPedSpeed >= 0.22)
     );
 
+    const activeElevUnit = this.getActiveElevatorUnit();
+    const elevatorAvailable = this.requiresElevator
+      ? Boolean(
+          activeElevUnit &&
+            activeElevUnit.state !== 'Out of Service' &&
+            activeElevUnit.state !== 'Stuck'
+        )
+      : true;
+
     const currentObs: QLearningObservation = {
       nearestPedDistM:
         hazard.nearestPerceivedDist ?? hazard.nearestActualDist ?? null,
@@ -1898,6 +2380,8 @@ export class AutonomousNavigationController {
         nominalCruiseSpeed > 0.1 ? this.currentSpeedMps / nominalCruiseSpeed : 0,
       pathBlocked: hazard.pathObstructedAhead,
       temporaryObstructionPresent,
+      elevatorAvailable,
+      navigationState: this.robotOpState,
     };
 
     if (this.useLegacyAvoidance) {
@@ -1956,12 +2440,16 @@ export class AutonomousNavigationController {
             this.robotPos.x - this.lastRlRobotPos.x,
             this.robotPos.z - this.lastRlRobotPos.z
           );
+          const safetyOverrideOccurred = Boolean(
+            hazard.imminentStopRequired && this.lastRlAction === 'MAINTAIN_SPEED'
+          );
+          if (safetyOverrideOccurred) {
+            this.safetyInterventionCount += 1;
+          }
           const stepReward = computeStepReward(this.lastRlObs, this.lastRlAction, {
             progressMeters: progressM,
             collisionOccurred: false,
-            safetyOverrideTriggered: Boolean(
-              hazard.imminentStopRequired && this.lastRlAction === 'MAINTAIN_SPEED'
-            ),
+            safetyOverrideTriggered: safetyOverrideOccurred,
             unnecessaryReplanTriggered: Boolean(
               this.lastRlAction === 'GLOBAL_REPLAN' &&
                 this.lastRlObs.temporaryObstructionPresent
@@ -2110,6 +2598,9 @@ export class AutonomousNavigationController {
       if (hazard.imminentStopRequired && conflictPed) {
         const dist = hazard.nearestActualDist ?? 99;
         if (dist < 1.38) {
+          if (this.pedestrianYieldTimerSec === 0) {
+            this.safetyInterventionCount += 1;
+          }
           // Hard Safety Override: prevent physical collision regardless of learned policy action
           desiredSpeed = 0;
           this.totalWaitingTimeSec += subDt;
@@ -2123,6 +2614,7 @@ export class AutonomousNavigationController {
 
           // If stuck at close range for > 1.0s, safety layer triggers local bypass or replan so robot never deadlocks
           if (this.pedestrianYieldTimerSec >= 1.0 && this.localBypassCooldownSec <= 0) {
+            this.safetyInterventionCount += 1;
             const safetyBypass = computeLocalBypassWaypoints(
               this.robotPos,
               this.waypoints,
@@ -2168,9 +2660,6 @@ export class AutonomousNavigationController {
       const hasActiveHazard =
         hazard.pathObstructedAhead || hazard.speedScaleFactor < 0.96;
 
-      // Baseline rule-based policies with low safety clearance (e.g., Greedy A*) or proactive replan thresholds
-      // trigger global replanning earlier when conflicts arise, whereas the Candidate Q-Learning policy
-      // learns to regulate speed and use local bypasses.
       if (
         hasPredictiveConflict &&
         predictive.proactiveReplanRecommended &&
@@ -2263,6 +2752,9 @@ export class AutonomousNavigationController {
 
         // Check if LEVEL 3 (Temporary Stop) is required to protect the collision safety boundary
         if (hazard.imminentStopRequired && conflictPed) {
+          if (this.pedestrianYieldTimerSec === 0) {
+            this.safetyInterventionCount += 1;
+          }
           desiredSpeed = 0;
           this.pedestrianYieldTimerSec += subDt;
           this.totalWaitingTimeSec += subDt;
@@ -2568,28 +3060,38 @@ export class AutonomousNavigationController {
       this.robotHeading += angleDiff * Math.min(1, subDt * 12.0);
     }
 
-    if (distToWp < 0.28) {
+    if (distToWp < 0.35) {
       if (this.currentWaypointIdx < this.waypoints.length - 1) {
         this.currentWaypointIdx += 1;
       } else {
-        // If in an intermediate elevator phase, let stepElevatorStateMachine handle transition on next sub-step
+        // If in an intermediate elevator phase, snap to the target waypoint and immediately advance the elevator state machine
         if (
           this.requiresElevator &&
           this.elevatorMissionPhase !== 'exiting-to-destination'
         ) {
+          this.robotPos = {
+            x: targetWp.x,
+            z: targetWp.z,
+            y: targetWp.y ?? this.robotAltitudeY,
+            floor: targetWp.floor ?? this.currentFloor,
+          };
+          this.currentSpeedMps = 0;
+          this.stepElevatorStateMachine(subDt);
           return;
         }
 
-        // Reached final destination! Verify genuine arrival at destination coordinates (2F indoor room or outdoor dock)
+        // Reached final destination! Verify genuine arrival at destination coordinates (1F/2F indoor room or outdoor dock)
         const activeElevCfg = this.getActiveElevatorConfig();
         const targetLoc = this.getTargetLocation();
         const finalGoalCoords: Vector2D =
-          this.requiresElevator && activeElevCfg
-            ? activeElevCfg.destinationRoomPos
+          this.requiresElevator && activeElevCfg && targetLoc.isIndoor
+            ? this.getTargetDestinationRoomCoords(activeElevCfg)
             : { x: targetLoc.position[0], z: targetLoc.position[2] };
         const finalGoalName =
-          this.requiresElevator && activeElevCfg
-            ? `${activeElevCfg.destinationRoomName} (${activeElevCfg.buildingName})`
+          this.requiresElevator && activeElevCfg && targetLoc.isIndoor
+            ? `${this.getTargetDestinationRoomName(activeElevCfg)} (${
+                activeElevCfg.buildingName
+              })`
             : targetLoc.name;
 
         const distToDest = Math.hypot(
@@ -2664,7 +3166,9 @@ export class AutonomousNavigationController {
       const activeElev = this.getActiveElevatorUnit();
       const activeElevCfg = this.getActiveElevatorConfig();
       const doorOpen = Boolean(
-        activeElev && (activeElev.doorOpenProgress ?? 0) >= 0.85
+        this.elevatorMissionPhase === 'boarding-cabin' ||
+          this.elevatorMissionPhase === 'exiting-to-destination' ||
+          (activeElev && (activeElev.doorOpenProgress ?? 0) >= 0.45)
       );
 
       const hit = checkSweptRobotCollision(
@@ -2679,6 +3183,7 @@ export class AutonomousNavigationController {
 
       if (hit && hit.collided) {
         if (hit.obstacleType === 'Dynamic Pedestrian') {
+          this.safetyInterventionCount += 1;
           this.robotPos = hit.safePosition;
           this.currentSpeedMps = 0;
           this.totalWaitingTimeSec += subDt;
@@ -2897,6 +3402,9 @@ export class AutonomousNavigationController {
       | 'isCandidatePolicy'
       | 'originName'
       | 'destinationName'
+      | 'originFloor'
+      | 'destinationFloor'
+      | 'safetyInterventionCount'
       | 'unnecessaryReplanCount'
       | 'deadlockCount'
       | 'episodeReward'
@@ -2972,9 +3480,11 @@ export class AutonomousNavigationController {
 
     const robotStateBeforeCompletion = `Pos (${this.robotPos.x.toFixed(
       1
-    )}m, ${this.robotPos.z.toFixed(1)}m) · Floor ${
+    )}m, ${this.robotPos.z.toFixed(1)}m, y=${this.robotAltitudeY.toFixed(
+      1
+    )}m) · Floor ${this.currentFloor} (${this.getFloorLabel(
       this.currentFloor
-    } · Speed ${this.currentSpeedMps.toFixed(
+    )}) · Speed ${this.currentSpeedMps.toFixed(
       2
     )} m/s · Battery ${this.batteryPct.toFixed(1)}% · Avoidance: ${
       this.activeAvoidanceLevel
@@ -2982,7 +3492,9 @@ export class AutonomousNavigationController {
 
     const environmentalConditionsSummary = `Seed: ${
       this.currentScenario.randomSeed ?? distConfig.randomSeed ?? 101
-    } · Pedestrians: ${
+    } · Floors: ${this.getFloorLabel(this.originFloor)} → ${this.getFloorLabel(
+      this.targetFloor
+    )} · Pedestrians: ${
       this.currentScenario.dynamicObstacleCount
     } (${distConfig.commuterCount}C/${distConfig.randomCount}R/${
       distConfig.crossingCount
@@ -3002,6 +3514,11 @@ export class AutonomousNavigationController {
         this.currentScenario.randomSeed ?? distConfig.randomSeed ?? 101,
       robotId: bot.id,
       robotName: bot.name,
+      robotHardwareSummary: formatRobotHardwareSummary(bot),
+      payloadKg:
+        this.activePayloadKg ??
+        bot.defaultPayloadKg ??
+        Math.round(bot.payloadCapacityKg * 0.4),
       policyId: this.currentPolicy.id,
       policyName: this.candidatePolicyState
         ? `${this.candidatePolicyState.name} (${this.candidatePolicyState.version})`
@@ -3014,9 +3531,14 @@ export class AutonomousNavigationController {
       ),
       originName: origin.name,
       destinationName:
-        this.requiresElevator && activeElevCfg
-          ? `${activeElevCfg.destinationRoomName} (${activeElevCfg.buildingName})`
+        this.requiresElevator && activeElevCfg && target.isIndoor
+          ? `${this.getTargetDestinationRoomName(activeElevCfg)} (${
+              activeElevCfg.buildingName
+            })`
           : target.name,
+      originFloor: this.originFloor,
+      destinationFloor: this.targetFloor,
+      safetyInterventionCount: this.safetyInterventionCount,
       unnecessaryReplanCount: this.unnecessaryReplanCount,
       deadlockCount:
         this.deadlockCount ||
@@ -3027,7 +3549,7 @@ export class AutonomousNavigationController {
           ? [...this.decisionHistory]
           : [
               `[t=0.0s] Dispatched via ${this.currentPolicy.algorithm}`,
-              `[t=${partial.durationSec.toFixed(1)}s] Mission ${partial.status} (${this.speedBasedAvoidanceCount} speed modulations, ${this.localBypassCount} local bypasses, ${this.globalReplanCount} global replans)`,
+              `[t=${partial.durationSec.toFixed(1)}s] Mission ${partial.status} (${this.speedBasedAvoidanceCount} speed modulations, ${this.localBypassCount} local bypasses, ${this.globalReplanCount} global replans, ${this.safetyInterventionCount} safety interventions)`,
             ],
       robotStateBeforeCompletion,
       environmentalConditionsSummary,

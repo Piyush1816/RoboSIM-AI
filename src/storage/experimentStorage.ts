@@ -2,17 +2,20 @@ import {
   DEFAULT_SCENARIOS,
   DEMO_PREVIEW_EXPERIMENTS,
   NAVIGATION_POLICIES,
+  ROBOT_UNITS,
 } from '../data/campusConfig';
 import { diagnoseExperimentFailure } from '../simulation/failureIntelligence';
 import { createInitialCandidatePolicyState } from '../simulation/policyLearner';
 import {
   BenchmarkSuiteResult,
   CandidatePolicyState,
+  CrossRobotBenchmarkResult,
   ExperimentRecord,
   FailureDiagnosisRecord,
   FailureDrivenGenerationBatch,
   FailureEventRecord,
   NavigationPolicyConfig,
+  RobotUnitConfig,
   ScenarioConfig,
 } from '../types/simulation';
 
@@ -23,8 +26,11 @@ export const STORAGE_KEYS = {
   POLICIES: 'robosim_ai_policies_v1',
   CANDIDATE_POLICY: 'robosim_ai_candidate_qpolicy_v1',
   BENCHMARKS: 'robosim_ai_benchmarks_v1',
+  ROBOT_BENCHMARKS: 'robosim_ai_robot_benchmarks_v1',
   FD_BATCHES: 'robosim_ai_fd_batches_v1',
   DEMO_MODE: 'robosim_ai_demo_mode_v1',
+  ROBOTS: 'robosim_ai_custom_robots_v1',
+  SELECTED_ROBOT_ID: 'robosim_ai_selected_robot_id_v1',
 };
 
 export const STORE_SYNC_EVENT = 'robosim_ai_store_sync_v1';
@@ -572,7 +578,10 @@ export function saveCustomScenariosBatch(
     const raw = localStorage.getItem(STORAGE_KEYS.SCENARIOS);
     const custom: ScenarioConfig[] = raw ? JSON.parse(raw) : [];
     const incomingIds = new Set(newScenarios.map((s) => s.id));
-    const filtered = custom.filter((c) => !incomingIds.has(c.id));
+    const incomingNames = new Set(newScenarios.map((s) => s.name));
+    const filtered = custom.filter(
+      (c) => !incomingIds.has(c.id) && !incomingNames.has(c.name)
+    );
     const updatedCustom = [
       ...filtered,
       ...newScenarios.map((s) => ({ ...s, isCustom: true })),
@@ -728,3 +737,126 @@ export function saveDemoPreviewPreference(enabled: boolean): void {
     // ignore
   }
 }
+
+export function loadRobots(): RobotUnitConfig[] {
+  try {
+    if (typeof localStorage === 'undefined') return ROBOT_UNITS;
+    const raw = localStorage.getItem(STORAGE_KEYS.ROBOTS);
+    if (!raw) return ROBOT_UNITS;
+    const custom: RobotUnitConfig[] = JSON.parse(raw);
+    if (!Array.isArray(custom)) return ROBOT_UNITS;
+    const defaultIds = new Set(ROBOT_UNITS.map((r) => r.id));
+    const uniqueCustom = custom
+      .filter((r) => r && r.id && !defaultIds.has(r.id))
+      .map((r) => ({ ...r, isCustom: true }));
+    return [...ROBOT_UNITS, ...uniqueCustom];
+  } catch {
+    return ROBOT_UNITS;
+  }
+}
+
+export function saveCustomRobot(robot: RobotUnitConfig): RobotUnitConfig[] {
+  try {
+    const normalized: RobotUnitConfig = {
+      ...robot,
+      isCustom: true,
+      collisionRadiusM:
+        robot.collisionRadiusM ??
+        Math.max(
+          0.42,
+          Number(
+            (
+              Math.hypot(robot.lengthM ?? 0.9, robot.widthM ?? 0.64) * 0.6
+            ).toFixed(2)
+          )
+        ),
+    };
+    if (typeof localStorage === 'undefined') {
+      return [...ROBOT_UNITS, normalized];
+    }
+    const raw = localStorage.getItem(STORAGE_KEYS.ROBOTS);
+    const custom: RobotUnitConfig[] = raw ? JSON.parse(raw) : [];
+    const filtered = Array.isArray(custom)
+      ? custom.filter((r) => r && r.id !== normalized.id)
+      : [];
+    const updatedCustom = [...filtered, normalized];
+    localStorage.setItem(STORAGE_KEYS.ROBOTS, JSON.stringify(updatedCustom));
+    notifyStoreSubscribers();
+    return [...ROBOT_UNITS, ...updatedCustom];
+  } catch {
+    return ROBOT_UNITS;
+  }
+}
+
+export function deleteCustomRobot(robotId: string): RobotUnitConfig[] {
+  try {
+    if (typeof localStorage === 'undefined') return ROBOT_UNITS;
+    const raw = localStorage.getItem(STORAGE_KEYS.ROBOTS);
+    const custom: RobotUnitConfig[] = raw ? JSON.parse(raw) : [];
+    const updatedCustom = Array.isArray(custom)
+      ? custom.filter((r) => r && r.id !== robotId)
+      : [];
+    localStorage.setItem(STORAGE_KEYS.ROBOTS, JSON.stringify(updatedCustom));
+    if (loadSelectedRobotId() === robotId) {
+      saveSelectedRobotId(ROBOT_UNITS[0].id);
+    }
+    notifyStoreSubscribers();
+    return [...ROBOT_UNITS, ...updatedCustom];
+  } catch {
+    return ROBOT_UNITS;
+  }
+}
+
+export function loadSelectedRobotId(): string {
+  try {
+    if (typeof localStorage === 'undefined') return ROBOT_UNITS[0].id;
+    const saved = localStorage.getItem(STORAGE_KEYS.SELECTED_ROBOT_ID);
+    const allRobots = loadRobots();
+    if (saved && allRobots.some((r) => r.id === saved)) {
+      return saved;
+    }
+    return ROBOT_UNITS[0].id;
+  } catch {
+    return ROBOT_UNITS[0].id;
+  }
+}
+
+export function saveSelectedRobotId(robotId: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STORAGE_KEYS.SELECTED_ROBOT_ID, robotId);
+    }
+    notifyStoreSubscribers();
+  } catch {
+    // ignore
+  }
+}
+
+export function loadCrossRobotBenchmarkHistory(): CrossRobotBenchmarkResult[] {
+  try {
+    if (typeof localStorage === 'undefined') return [];
+    const raw = localStorage.getItem(STORAGE_KEYS.ROBOT_BENCHMARKS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveCrossRobotBenchmarkResult(
+  result: CrossRobotBenchmarkResult
+): CrossRobotBenchmarkResult[] {
+  try {
+    const current = loadCrossRobotBenchmarkHistory();
+    const updated = [result, ...current.filter((b) => b.id !== result.id)];
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STORAGE_KEYS.ROBOT_BENCHMARKS, JSON.stringify(updated));
+    }
+    notifyStoreSubscribers();
+    return updated;
+  } catch {
+    return [result];
+  }
+}
+

@@ -16,7 +16,10 @@ import {
   PathUpdateEvent,
   SimulationCompletionData,
 } from '../simulation/navigationController';
-import { loadCandidatePolicyState } from '../storage/experimentStorage';
+import {
+  loadCandidatePolicyState,
+  loadRobots,
+} from '../storage/experimentStorage';
 import {
   CELL_SIZE,
   getActiveConstructionObstacleBounds,
@@ -31,6 +34,7 @@ import {
   NavigationPolicyConfig,
   PedestrianDistributionConfig,
   PredictionHorizonSec,
+  RobotUnitConfig,
   ScenarioConfig,
   SimulationLogEntry,
   Vector2D,
@@ -73,6 +77,7 @@ export class CampusSceneManager {
   private robotWheels: THREE.Group[] = [];
 
   private pathLineGroup = new THREE.Group();
+  private nextWaypointMarkerGroup = new THREE.Group();
   private gridOverlayGroup = new THREE.Group();
   private collisionDebugGroup = new THREE.Group();
   private robotCurrentCellMarker!: THREE.Group;
@@ -89,6 +94,8 @@ export class CampusSceneManager {
       cabGroup: THREE.Group;
       groundDoorL: THREE.Mesh;
       groundDoorR: THREE.Mesh;
+      firstDoorL: THREE.Mesh;
+      firstDoorR: THREE.Mesh;
       upperDoorL: THREE.Mesh;
       upperDoorR: THREE.Mesh;
       beaconMat: THREE.MeshBasicMaterial;
@@ -220,8 +227,10 @@ export class CampusSceneManager {
     this.buildConstructionZones();
     this.buildAutonomousRobot();
     this.buildRobotCurrentCellMarker();
+    this.buildNextWaypointMarker();
 
     this.scene.add(this.pathLineGroup);
+    this.scene.add(this.nextWaypointMarkerGroup);
     this.scene.add(this.gridOverlayGroup);
     this.scene.add(this.collisionDebugGroup);
     this.scene.add(this.predictiveConflictGroup);
@@ -616,7 +625,7 @@ export class CampusSceneManager {
   private buildDeliveryAndChargingStations(): void {
     for (const loc of DELIVERY_LOCATIONS) {
       const group = new THREE.Group();
-      group.position.set(loc.position[0], 0, loc.position[2]);
+      group.position.set(loc.position[0], loc.position[1], loc.position[2]);
 
       const isCharging = loc.type === 'charging';
       const primaryColor = isCharging ? 0x10b981 : 0x06b6d4;
@@ -861,6 +870,15 @@ export class CampusSceneManager {
       groundDoorR.position.set(cx + 0.52, 1.25, elev.doorwayPos.z);
       group.add(groundDoorR);
 
+      const firstY = 1 * fh;
+      const firstDoorL = new THREE.Mesh(doorGeo, doorMat);
+      firstDoorL.position.set(cx - 0.52, firstY + 1.25, elev.doorwayPos.z);
+      group.add(firstDoorL);
+
+      const firstDoorR = new THREE.Mesh(doorGeo, doorMat);
+      firstDoorR.position.set(cx + 0.52, firstY + 1.25, elev.doorwayPos.z);
+      group.add(firstDoorR);
+
       const upperY = elev.destinationFloor * fh;
       const upperDoorL = new THREE.Mesh(doorGeo, doorMat);
       upperDoorL.position.set(cx - 0.52, upperY + 1.25, elev.doorwayPos.z);
@@ -927,6 +945,27 @@ export class CampusSceneManager {
 
       group.add(cabGroup);
 
+      // 6b. First Floor Internal Corridor (y = 3.6m, spanning West & East wings)
+      const firstFloorPos = elev.firstFloorRoomPos ?? elev.destinationRoomPos;
+      const firstCorridorW =
+        elev.buildingId === 'bldg-student-center'
+          ? 12.2
+          : Math.abs(firstFloorPos.x - elev.lobbyPos.x) + 2.6;
+      const firstCorridorCenterX =
+        elev.buildingId === 'bldg-student-center'
+          ? elev.lobbyPos.x + 0.3
+          : (firstFloorPos.x + elev.lobbyPos.x) / 2;
+      const firstCorridorMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(firstCorridorW, 0.1, 2.8),
+        corridorMat
+      );
+      firstCorridorMesh.position.set(
+        firstCorridorCenterX,
+        firstY + 0.06,
+        elev.lobbyPos.z
+      );
+      group.add(firstCorridorMesh);
+
       // 7. Second Floor Internal Corridor & Destination Room Delivery Point (y = 7.2m)
       const destPos = elev.destinationRoomPos;
       const upperCorridorW = Math.abs(destPos.x - elev.lobbyPos.x) + 2.6;
@@ -942,32 +981,13 @@ export class CampusSceneManager {
       );
       group.add(upperCorridorMesh);
 
-      const destPad = new THREE.Mesh(
-        new THREE.CylinderGeometry(1.25, 1.35, 0.1, 24),
-        corridorMat
-      );
-      destPad.position.set(destPos.x, upperY + 0.06, destPos.z);
-      group.add(destPad);
-
-      const destRing = new THREE.Mesh(
-        new THREE.RingGeometry(0.85, 1.15, 28),
-        new THREE.MeshBasicMaterial({
-          color: 0x10b981,
-          side: THREE.DoubleSide,
-          transparent: true,
-          opacity: 0.9,
-        })
-      );
-      destRing.rotation.x = -Math.PI / 2;
-      destRing.position.set(destPos.x, upperY + 0.13, destPos.z);
-      group.add(destRing);
-      this.deliveryRingMeshes.push(destRing);
-
       this.elevatorHandles.set(elev.id, {
         group,
         cabGroup,
         groundDoorL,
         groundDoorR,
+        firstDoorL,
+        firstDoorR,
         upperDoorL,
         upperDoorR,
         beaconMat,
@@ -1064,10 +1084,37 @@ export class CampusSceneManager {
     }
   }
 
-  private buildAutonomousRobot(): void {
-    this.robotGroup.position.set(-15, 0, -20);
+  private buildAutonomousRobot(robotConfig?: RobotUnitConfig): void {
+    const bot = robotConfig ?? ROBOT_UNITS[0];
+    const prevPos = this.robotGroup.position.clone();
+    const prevRotY = this.robotGroup.rotation.y;
+    const prevColliderVis = this.robotDebugCollider?.visible ?? false;
+    const prevConeVis = this.robotSensorCone?.visible ?? true;
 
-    const shadowGeo = new THREE.PlaneGeometry(2.4, 2.8);
+    while (this.robotGroup.children.length > 0) {
+      this.robotGroup.remove(this.robotGroup.children[0]);
+    }
+    this.robotWheels = [];
+
+    if (prevPos.lengthSq() === 0) {
+      this.robotGroup.position.set(-15, 0, -20);
+    } else {
+      this.robotGroup.position.copy(prevPos);
+      this.robotGroup.rotation.y = prevRotY;
+    }
+
+    // Scale dimensions relative to CortexRover X1 (0.85m length, 0.62m width, 0.74m height)
+    const lengthScale = (bot.lengthM ?? 0.85) / 0.85;
+    const widthScale = (bot.widthM ?? 0.62) / 0.62;
+    const heightScale = (bot.heightM ?? 0.74) / 0.74;
+
+    const baseW = 1.3 * widthScale;
+    const baseD = 1.75 * lengthScale;
+    const chassisW = 1.22 * widthScale;
+    const chassisH = 0.68 * heightScale;
+    const chassisD = 1.58 * lengthScale;
+
+    const shadowGeo = new THREE.PlaneGeometry(baseW + 1.0, baseD + 1.0);
     const shadowMat = new THREE.MeshBasicMaterial({
       color: 0x000000,
       transparent: true,
@@ -1085,43 +1132,55 @@ export class CampusSceneManager {
       roughness: 0.35,
     });
     const lowerBase = new THREE.Mesh(
-      new THREE.BoxGeometry(1.3, 0.34, 1.75),
+      new THREE.BoxGeometry(baseW, 0.34, baseD),
       lowerBaseMat
     );
     lowerBase.position.y = 0.4;
     lowerBase.castShadow = true;
     this.robotGroup.add(lowerBase);
 
+    const chassisColorHex = bot.chassisColor
+      ? parseInt(bot.chassisColor.replace('#', ''), 16)
+      : 0xe2e8f0;
     const chassisMat = new THREE.MeshStandardMaterial({
-      color: 0xe2e8f0,
-      metalness: 0.25,
+      color: Number.isNaN(chassisColorHex) ? 0xe2e8f0 : chassisColorHex,
+      metalness: 0.28,
       roughness: 0.22,
     });
     this.robotChassisMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(1.22, 0.68, 1.58),
+      new THREE.BoxGeometry(chassisW, chassisH, chassisD),
       chassisMat
     );
-    this.robotChassisMesh.position.y = 0.9;
+    const chassisCenterY = 0.56 + chassisH / 2;
+    this.robotChassisMesh.position.y = chassisCenterY;
     this.robotChassisMesh.castShadow = true;
     this.robotGroup.add(this.robotChassisMesh);
 
+    const hatchY = 0.56 + chassisH + 0.03;
     const hatchMat = new THREE.MeshStandardMaterial({
       color: 0x334155,
       metalness: 0.55,
       roughness: 0.4,
     });
-    const hatch = new THREE.Mesh(new THREE.BoxGeometry(1.06, 0.08, 1.24), hatchMat);
-    hatch.position.set(0, 1.27, -0.06);
+    const hatch = new THREE.Mesh(
+      new THREE.BoxGeometry(chassisW * 0.86, 0.08, chassisD * 0.78),
+      hatchMat
+    );
+    hatch.position.set(0, hatchY, -0.06);
     this.robotGroup.add(hatch);
 
+    const accentColorHex = bot.accentColor
+      ? parseInt(bot.accentColor.replace('#', ''), 16)
+      : 0x06b6d4;
+    const accentColorVal = Number.isNaN(accentColorHex) ? 0x06b6d4 : accentColorHex;
     const accentMat = new THREE.MeshStandardMaterial({
-      color: 0x06b6d4,
-      emissive: 0x06b6d4,
+      color: accentColorVal,
+      emissive: accentColorVal,
       emissiveIntensity: 0.55,
       roughness: 0.2,
     });
     this.robotAccentMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(1.26, 0.11, 1.62),
+      new THREE.BoxGeometry(chassisW + 0.04, 0.11, chassisD + 0.04),
       accentMat
     );
     this.robotAccentMesh.position.y = 0.75;
@@ -1138,26 +1197,40 @@ export class CampusSceneManager {
       roughness: 0.2,
     });
 
-    const wheelOffsets: [number, number][] = [
-      [-0.7, 0.56],
-      [0.7, 0.56],
-      [-0.7, -0.56],
-      [0.7, -0.56],
-    ];
+    const isSixWheel = bot.wheelConfiguration === '6-Wheel Heavy Differential';
+    const wheelRadius =
+      bot.wheelConfiguration === 'Compact 4-Wheel Omni/Express' ? 0.28 : 0.32;
+    const wxMag = baseW / 2 + 0.05;
+    const wzMag = baseD * 0.34;
+    const wheelOffsets: [number, number][] = isSixWheel
+      ? [
+          [-wxMag, wzMag],
+          [wxMag, wzMag],
+          [-wxMag, 0],
+          [wxMag, 0],
+          [-wxMag, -wzMag],
+          [wxMag, -wzMag],
+        ]
+      : [
+          [-wxMag, wzMag],
+          [wxMag, wzMag],
+          [-wxMag, -wzMag],
+          [wxMag, -wzMag],
+        ];
 
     for (const [wx, wz] of wheelOffsets) {
       const wheelGroup = new THREE.Group();
-      wheelGroup.position.set(wx, 0.32, wz);
+      wheelGroup.position.set(wx, wheelRadius, wz);
 
       const tire = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.32, 0.32, 0.22, 18),
+        new THREE.CylinderGeometry(wheelRadius, wheelRadius, 0.22, 18),
         tireMat
       );
       tire.rotation.z = Math.PI / 2;
       wheelGroup.add(tire);
 
       const hub = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.16, 0.16, 0.24, 12),
+        new THREE.CylinderGeometry(wheelRadius * 0.5, wheelRadius * 0.5, 0.24, 12),
         hubMat
       );
       hub.rotation.z = Math.PI / 2;
@@ -1172,26 +1245,29 @@ export class CampusSceneManager {
       metalness: 0.9,
       roughness: 0.1,
     });
-    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.22, 0.1), visorMat);
-    visor.position.set(0, 1.0, 0.78);
+    const visor = new THREE.Mesh(
+      new THREE.BoxGeometry(chassisW * 0.7, 0.22, 0.1),
+      visorMat
+    );
+    visor.position.set(0, chassisCenterY + 0.08, chassisD / 2 + 0.02);
     this.robotGroup.add(visor);
 
     const frontLed = new THREE.Mesh(
-      new THREE.BoxGeometry(0.76, 0.07, 0.06),
-      new THREE.MeshBasicMaterial({ color: 0x38bdf8 })
+      new THREE.BoxGeometry(chassisW * 0.62, 0.07, 0.06),
+      new THREE.MeshBasicMaterial({ color: accentColorVal })
     );
-    frontLed.position.set(0, 0.58, 0.89);
+    frontLed.position.set(0, 0.58, baseD / 2 + 0.02);
     this.robotGroup.add(frontLed);
 
     const rearLed = new THREE.Mesh(
-      new THREE.BoxGeometry(0.76, 0.07, 0.06),
+      new THREE.BoxGeometry(chassisW * 0.62, 0.07, 0.06),
       new THREE.MeshBasicMaterial({ color: 0xef4444 })
     );
-    rearLed.position.set(0, 0.58, -0.89);
+    rearLed.position.set(0, 0.58, -baseD / 2 - 0.02);
     this.robotGroup.add(rearLed);
 
     this.robotLidarTurret = new THREE.Group();
-    this.robotLidarTurret.position.set(0, 1.32, 0.35);
+    this.robotLidarTurret.position.set(0, hatchY + 0.04, chassisD * 0.22);
 
     const mast = new THREE.Mesh(
       new THREE.CylinderGeometry(0.13, 0.18, 0.26, 14),
@@ -1217,10 +1293,42 @@ export class CampusSceneManager {
 
     this.robotGroup.add(this.robotLidarTurret);
 
-    // Forward LiDAR / Depth Sensor Field-of-View Wedge on Ground
-    const coneGeo = new THREE.CircleGeometry(5.5, 24, Math.PI / 2 - 0.48, 0.96);
+    // Secondary Rear LiDAR Turret for Dual 3D Dome LiDAR configurations (e.g., OmniStride S4)
+    if (bot.lidarType === 'Dual 3D Dome LiDAR') {
+      const rearTurret = new THREE.Group();
+      rearTurret.position.set(0, hatchY + 0.04, -chassisD * 0.28);
+      const rearMast = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.11, 0.15, 0.2, 12),
+        lowerBaseMat
+      );
+      rearMast.position.y = 0.1;
+      rearTurret.add(rearMast);
+      const rearPuck = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.18, 0.18, 0.13, 16),
+        visorMat
+      );
+      rearPuck.position.y = 0.24;
+      rearTurret.add(rearPuck);
+      this.robotGroup.add(rearTurret);
+    }
+
+    // Forward LiDAR / Depth Sensor Field-of-View Wedge scaled by robot's lidarRangeM & lidarFovDeg
+    const visualConeRadius = Math.max(
+      4.2,
+      Math.min(9.5, (bot.lidarRangeM ?? 24) * 0.23)
+    );
+    const fovRad = Math.min(
+      Math.PI * 0.72,
+      Math.max(0.65, ((bot.lidarFovDeg ?? 270) / 270) * 0.96)
+    );
+    const coneGeo = new THREE.CircleGeometry(
+      visualConeRadius,
+      24,
+      Math.PI / 2 - fovRad / 2,
+      fovRad
+    );
     const coneMat = new THREE.MeshBasicMaterial({
-      color: 0x06b6d4,
+      color: accentColorVal,
       transparent: true,
       opacity: 0.18,
       side: THREE.DoubleSide,
@@ -1228,13 +1336,15 @@ export class CampusSceneManager {
     });
     this.robotSensorCone = new THREE.Mesh(coneGeo, coneMat);
     this.robotSensorCone.rotation.x = -Math.PI / 2;
-    this.robotSensorCone.position.set(0, 0.12, 0.8);
+    this.robotSensorCone.position.set(0, 0.12, baseD / 2);
+    this.robotSensorCone.visible = prevConeVis;
     this.robotGroup.add(this.robotSensorCone);
 
+    const colliderRadius = bot.collisionRadiusM ?? ROBOT_COLLISION_RADIUS;
     const colliderBoxGeo = new THREE.CylinderGeometry(
-      ROBOT_COLLISION_RADIUS,
-      ROBOT_COLLISION_RADIUS,
-      1.6,
+      colliderRadius,
+      colliderRadius,
+      1.6 * heightScale,
       16
     );
     const colliderEdges = new THREE.EdgesGeometry(colliderBoxGeo);
@@ -1242,11 +1352,13 @@ export class CampusSceneManager {
       colliderEdges,
       new THREE.LineBasicMaterial({ color: 0x10b981 })
     );
-    this.robotDebugCollider.position.y = 0.82;
-    this.robotDebugCollider.visible = false;
+    this.robotDebugCollider.position.y = 0.82 * heightScale;
+    this.robotDebugCollider.visible = prevColliderVis;
     this.robotGroup.add(this.robotDebugCollider);
 
-    this.scene.add(this.robotGroup);
+    if (!this.robotGroup.parent) {
+      this.scene.add(this.robotGroup);
+    }
   }
 
   private buildRobotCurrentCellMarker(): void {
@@ -1275,6 +1387,58 @@ export class CampusSceneManager {
 
     this.robotCurrentCellMarker.visible = false;
     this.scene.add(this.robotCurrentCellMarker);
+  }
+
+  private buildNextWaypointMarker(): void {
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.32, 0.52, 24),
+      new THREE.MeshBasicMaterial({
+        color: 0xf59e0b,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.9,
+      })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.19;
+    this.nextWaypointMarkerGroup.add(ring);
+
+    const beacon = new THREE.Mesh(
+      new THREE.SphereGeometry(0.26, 12, 12),
+      new THREE.MeshBasicMaterial({
+        color: 0xfbbf24,
+      })
+    );
+    beacon.position.y = 0.35;
+    this.nextWaypointMarkerGroup.add(beacon);
+    this.nextWaypointMarkerGroup.visible = false;
+  }
+
+  private updateNextWaypointMarker(): void {
+    if (
+      !this.showPathLine ||
+      !this.navController ||
+      !Array.isArray(this.navController.waypoints) ||
+      this.navController.waypoints.length < 2
+    ) {
+      this.nextWaypointMarkerGroup.visible = false;
+      return;
+    }
+    const idx = Math.min(
+      Math.max(0, this.navController.currentWaypointIdx),
+      this.navController.waypoints.length - 1
+    );
+    const nextWp = this.navController.waypoints[idx];
+    if (!nextWp) {
+      this.nextWaypointMarkerGroup.visible = false;
+      return;
+    }
+    this.nextWaypointMarkerGroup.visible = true;
+    this.nextWaypointMarkerGroup.position.set(
+      nextWp.x,
+      nextWp.y ?? this.navController.robotAltitudeY,
+      nextWp.z
+    );
   }
 
   private rebuildDynamicObstacles(): void {
@@ -1427,8 +1591,9 @@ export class CampusSceneManager {
       this.pathLineGroup.add(dot);
     }
 
-    // If an elevator mission is in its ground approach phase, also render a preview line
-    // through the single doorway, up the vertical shaft, and along the 2F corridor to the destination room
+    // If an elevator mission is in its approach phase, also render a preview line
+    // through the single doorway, along the vertical shaft between originFloor and targetFloor,
+    // and out to the target destination room
     if (
       this.navController &&
       this.navController.requiresElevator &&
@@ -1436,20 +1601,22 @@ export class CampusSceneManager {
     ) {
       const elevCfg = this.navController.getActiveElevatorConfig();
       if (elevCfg) {
-        const upperY = elevCfg.destinationFloor * elevCfg.floorHeightM;
+        const originY = this.navController.originFloor * elevCfg.floorHeightM;
+        const destY = this.navController.targetFloor * elevCfg.floorHeightM;
+        const destCoords =
+          this.navController.getTargetDestinationRoomCoords(elevCfg);
         const previewPts: THREE.Vector3[] = [
-          new THREE.Vector3(elevCfg.lobbyPos.x, 0.16, elevCfg.lobbyPos.z),
-          new THREE.Vector3(elevCfg.doorwayPos.x, 0.16, elevCfg.doorwayPos.z),
-          new THREE.Vector3(elevCfg.cabinPos.x, 0.16, elevCfg.cabinPos.z),
-          new THREE.Vector3(elevCfg.cabinPos.x, upperY + 0.16, elevCfg.cabinPos.z),
-          ...elevCfg.upperCorridorWaypoints.map(
-            (p) => new THREE.Vector3(p.x, upperY + 0.16, p.z)
-          ),
+          new THREE.Vector3(elevCfg.lobbyPos.x, originY + 0.16, elevCfg.lobbyPos.z),
           new THREE.Vector3(
-            elevCfg.destinationRoomPos.x,
-            upperY + 0.16,
-            elevCfg.destinationRoomPos.z
+            elevCfg.doorwayPos.x,
+            originY + 0.16,
+            elevCfg.doorwayPos.z
           ),
+          new THREE.Vector3(elevCfg.cabinPos.x, originY + 0.16, elevCfg.cabinPos.z),
+          new THREE.Vector3(elevCfg.cabinPos.x, destY + 0.16, elevCfg.cabinPos.z),
+          new THREE.Vector3(elevCfg.doorwayPos.x, destY + 0.16, elevCfg.doorwayPos.z),
+          new THREE.Vector3(elevCfg.lobbyPos.x, destY + 0.16, elevCfg.lobbyPos.z),
+          new THREE.Vector3(destCoords.x, destY + 0.16, destCoords.z),
         ];
         const prevGeo = new THREE.BufferGeometry().setFromPoints(previewPts);
         const prevMat = new THREE.LineBasicMaterial({
@@ -1629,20 +1796,21 @@ export class CampusSceneManager {
     robotId: string,
     destinationOverrideId: string | null = null
   ): void {
-    const bot = ROBOT_UNITS.find((r) => r.id === robotId) ?? ROBOT_UNITS[0];
-    (this.robotChassisMesh.material as THREE.MeshStandardMaterial).color.set(
-      bot.chassisColor
-    );
-    const accentMat = this.robotAccentMesh.material as THREE.MeshStandardMaterial;
-    accentMat.color.set(bot.accentColor);
-    accentMat.emissive.set(bot.accentColor);
+    const allRobots = loadRobots();
+    const bot =
+      allRobots.find((r) => r.id === robotId) ??
+      ROBOT_UNITS.find((r) => r.id === robotId) ??
+      ROBOT_UNITS[0];
 
+    this.navController.setRobotHardwareConfig(bot);
     this.navController.setConfiguration(
       scenario,
       policy,
       robotId,
       destinationOverrideId
     );
+    this.buildAutonomousRobot(bot);
+
     if (policy.isCandidatePolicy) {
       this.navController.setCandidatePolicyState(loadCandidatePolicyState(), false);
     } else {
@@ -1688,7 +1856,12 @@ export class CampusSceneManager {
   private updateBuildingCutawayTransparency(): void {
     const isCutawayActive =
       this.showBuildingCutaway ||
-      Boolean(this.navController && this.navController.requiresElevator) ||
+      Boolean(
+        this.navController &&
+          (this.navController.requiresElevator ||
+            this.navController.originFloor > 0 ||
+            this.navController.targetFloor > 0)
+      ) ||
       this.cameraMode === 'elevator-interior';
 
     for (const [bldgId, shell] of this.buildingShellMeshes.entries()) {
@@ -1830,6 +2003,7 @@ export class CampusSceneManager {
     this.rebuildPathVisual(this.navController.getPathUpdateEvent());
     this.rebuildGridAndDebugVisuals();
     this.updateRobotCellMarkerPosition();
+    this.updateNextWaypointMarker();
     this.updateElevatorVisuals();
   }
 
@@ -1872,26 +2046,31 @@ export class CampusSceneManager {
       const cabY = Math.max(0, unit.currentFloor) * fh;
       handle.cabGroup.position.y = cabY;
 
-      // Animate bi-parting sliding doors on Ground Floor (0) and Upper Floor (2)
+      // Animate bi-parting sliding doors on Ground Floor (0), First Floor (1), and Second Floor (2)
       const cx = unit.cabinPos?.x ?? 0;
       const openRatio = unit.doorOpenProgress ?? 0;
-      const groundOpen = unit.currentFloor < 0.5 ? openRatio : 0;
-      const upperOpen = unit.currentFloor >= 1.5 ? openRatio : 0;
+      const groundOpen = Math.abs(unit.currentFloor - 0) < 0.35 ? openRatio : 0;
+      const firstOpen = Math.abs(unit.currentFloor - 1) < 0.35 ? openRatio : 0;
+      const upperOpen = Math.abs(unit.currentFloor - 2) < 0.35 ? openRatio : 0;
 
       handle.groundDoorL.position.x = cx - 0.52 - groundOpen * 0.62;
       handle.groundDoorR.position.x = cx + 0.52 + groundOpen * 0.62;
+      handle.firstDoorL.position.x = cx - 0.52 - firstOpen * 0.62;
+      handle.firstDoorR.position.x = cx + 0.52 + firstOpen * 0.62;
       handle.upperDoorL.position.x = cx - 0.52 - upperOpen * 0.62;
       handle.upperDoorR.position.x = cx + 0.52 + upperOpen * 0.62;
 
       if (
         unit.state === 'Stuck' ||
         unit.state === 'Out of Service' ||
-        unit.state === 'Emergency Assistance'
+        unit.state === 'Emergency Assistance' ||
+        unit.machineState === 'STUCK' ||
+        unit.machineState === 'OUT_OF_SERVICE'
       ) {
         handle.beaconMat.color.setHex(0xef4444);
       } else if (unit.state === 'Delayed') {
         handle.beaconMat.color.setHex(0xf59e0b);
-      } else if (unit.state === 'Available') {
+      } else if (unit.state === 'Available' && unit.machineState === 'IDLE') {
         handle.beaconMat.color.setHex(0x10b981);
       } else {
         handle.beaconMat.color.setHex(0x06b6d4);
@@ -2006,13 +2185,24 @@ export class CampusSceneManager {
 
     this.updateElevatorVisuals();
 
+    // Synchronize robot vertical transform with active elevator cabin when aboard
+    const activeElev = this.navController.elevatorUnits.find((e) => e.robotInside);
+    const activeCabHandle = activeElev
+      ? this.elevatorHandles.get(activeElev.id)
+      : undefined;
+    const syncedRobotY =
+      activeElev && activeCabHandle
+        ? activeCabHandle.cabGroup.position.y + 0.08
+        : this.navController.robotAltitudeY;
+
     this.robotGroup.position.set(
       this.navController.robotPos.x,
-      this.navController.robotAltitudeY,
+      syncedRobotY,
       this.navController.robotPos.z
     );
     this.robotGroup.rotation.y = this.navController.robotHeading;
     this.updateRobotCellMarkerPosition();
+    this.updateNextWaypointMarker();
 
     if (this.navController.runState === 'running') {
       this.emitTelemetry();

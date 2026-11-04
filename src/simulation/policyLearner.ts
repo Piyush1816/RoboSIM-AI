@@ -57,6 +57,7 @@ export function createInitialCandidatePolicyState(): CandidatePolicyState {
       'scen-nominal-campus',
       'scen-construction-detour',
       'scen-low-visibility',
+      'scen-elevator-normal',
     ],
     heldOutScenarioIds: [
       'scen-congestion-peak',
@@ -68,7 +69,7 @@ export function createInitialCandidatePolicyState(): CandidatePolicyState {
 
 /**
  * Discretizes continuous robot observations into an interpretable tabular state key.
- * Captures all 7 required observation features from Section 7:
+ * Captures all required observation features:
  * 1. Distance to nearest pedestrian
  * 2. Relative pedestrian movement
  * 3. Time to potential collision (TTC)
@@ -76,6 +77,7 @@ export function createInitialCandidatePolicyState(): CandidatePolicyState {
  * 5. Current robot speed ratio
  * 6. Whether current path is blocked
  * 7. Whether a temporary obstruction is present
+ * 8. Elevator availability
  */
 export function encodeObservationToStateKey(obs: QLearningObservation): string {
   const pedDistBin =
@@ -110,8 +112,9 @@ export function encodeObservationToStateKey(obs: QLearningObservation): string {
 
   const pathBin = obs.pathBlocked ? 'blocked' : 'open';
   const tempBin = obs.temporaryObstructionPresent ? 'temp' : 'persist';
+  const elevBin = obs.elevatorAvailable === false ? 'elev_fault' : 'elev_ok';
 
-  return `ped:${pedDistBin}|mot:${relMotion}|ttc:${ttcBin}|obs:${obsDistBin}|spd:${speedBin}|path:${pathBin}|tmp:${tempBin}`;
+  return `ped:${pedDistBin}|mot:${relMotion}|ttc:${ttcBin}|obs:${obsDistBin}|spd:${speedBin}|path:${pathBin}|tmp:${tempBin}|${elevBin}`;
 }
 
 export function ensureStateInQTable(

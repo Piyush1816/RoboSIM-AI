@@ -265,19 +265,26 @@ export const FailureAnalysisPage: React.FC<FailureAnalysisPageProps> = ({
                   const isSafeStop = d.outcomeDistinction === 'Safe Stop (Blocked/Fault)';
                   return (
                     <div key={d.id} className="p-5 space-y-3.5">
-                      {/* Top Header: Fields 1, 2, 3, 4 + Outcome Distinction */}
+                      {/* Top Header: Experiment, Scenario, Policy + Outcome Distinction */}
                       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-mono text-rose-400 font-semibold">
-                            1. Exp: {d.experimentId}
+                            Exp: {d.experimentId}
                           </span>
                           <span className="text-slate-600">·</span>
                           <span className="font-mono text-slate-300">
-                            2. Scenario: {d.scenarioId}
+                            Scenario: {d.scenarioId}
                           </span>
                           <span className="text-slate-600">·</span>
                           <span className="font-mono text-cyan-400">
-                            3. Policy v{d.policyVersion} ({d.policyName})
+                            Policy v{d.policyVersion} ({d.policyName})
+                          </span>
+                          <span className="text-slate-600">·</span>
+                          <span
+                            className="font-mono text-emerald-400"
+                            title={d.robotHardwareSummary}
+                          >
+                            Robot: {d.robotName}
                           </span>
                         </div>
                         <span
@@ -293,79 +300,83 @@ export const FailureAnalysisPage: React.FC<FailureAnalysisPageProps> = ({
                         </span>
                       </div>
 
-                      {/* Field 4: Failure Category */}
-                      <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
-                        <div>
-                          <span className="text-slate-500 text-[11px] block">
-                            4. Automated Failure Category
-                          </span>
-                          <span className="font-display font-semibold text-sm text-rose-300">
-                            {d.failureCategory}
-                          </span>
+                      {/* Diagnostic Question 1: What happened? */}
+                      <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 space-y-1.5 text-xs">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <span className="text-rose-400 font-semibold text-[11px] block">
+                              1. What happened? ({d.failureCategory})
+                            </span>
+                            <span className="font-display font-semibold text-sm text-slate-100">
+                              {d.outcomeDistinction} at ({d.coordinates.x.toFixed(1)}m,{' '}
+                              {d.coordinates.z.toFixed(1)}m) in {d.scenarioName}
+                            </span>
+                          </div>
                         </div>
-                        <div className="text-right">
-                          <span className="text-slate-500 text-[11px] block">
-                            Scenario & Coordinates
-                          </span>
-                          <span className="font-mono text-slate-200">
-                            {d.scenarioName} · ({d.coordinates.x.toFixed(1)}m,{' '}
-                            {d.coordinates.z.toFixed(1)}m)
-                          </span>
-                        </div>
+                        <p className="text-slate-300 text-[11px] leading-relaxed">
+                          <span className="text-slate-400 font-medium">State before incident:</span>{' '}
+                          {d.robotStateBeforeFailure}
+                        </p>
                       </div>
 
-                      {/* Fields 5, 6, 7: Environmental Conditions, Robot State Before Failure, Actions Taken */}
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-xs">
+                      {/* Diagnostic Questions 2 & 3: Why did it happen? & Which conditions contributed? */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-xs">
+                        <div className="p-2.5 rounded-lg bg-slate-900/50 border border-slate-800/80">
+                          <span className="text-[11px] font-semibold text-amber-400 block mb-1">
+                            2. Why did it happen? (Root Cause)
+                          </span>
+                          <p className="text-slate-300 text-[11px] leading-relaxed">
+                            {d.probableRootCause}
+                          </p>
+                        </div>
                         <div className="p-2.5 rounded-lg bg-slate-900/50 border border-slate-800/80">
                           <span className="text-[11px] font-semibold text-cyan-400 block mb-1">
-                            5. Environmental Conditions
+                            3. Which conditions contributed?
                           </span>
                           <p className="text-slate-300 text-[11px] leading-relaxed">
                             {d.environmentalConditions}
                           </p>
                         </div>
-                        <div className="p-2.5 rounded-lg bg-slate-900/50 border border-slate-800/80">
-                          <span className="text-[11px] font-semibold text-amber-400 block mb-1">
-                            6. Robot State Before Failure
-                          </span>
-                          <p className="text-slate-300 text-[11px] leading-relaxed">
-                            {d.robotStateBeforeFailure}
-                          </p>
-                        </div>
-                        <div className="p-2.5 rounded-lg bg-slate-900/50 border border-slate-800/80">
-                          <span className="text-[11px] font-semibold text-purple-300 block mb-1">
-                            7. Actions Taken by Robot
-                          </span>
-                          <p className="text-slate-300 text-[11px] leading-relaxed">
-                            {d.actionsTaken}
-                          </p>
-                        </div>
                       </div>
 
-                      {/* Fields 8 & 9: Probable Root Cause & Supporting Evidence */}
-                      <div className="space-y-2 text-xs bg-slate-900/40 border border-slate-800/70 rounded-lg p-3">
-                        <div>
-                          <span className="font-semibold text-slate-200">
-                            8. Probable Root Cause:{' '}
+                      {/* Diagnostic Questions 4 & 5: Supporting Evidence & Targeted Scenario Recommendation */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-xs">
+                        <div className="p-2.5 rounded-lg bg-slate-900/50 border border-slate-800/80 space-y-1">
+                          <span className="text-[11px] font-semibold text-purple-300 block">
+                            4. What evidence supports the diagnosis?
                           </span>
-                          <span className="text-slate-300">{d.probableRootCause}</span>
-                        </div>
-                        <div className="border-t border-slate-800/80 pt-1.5">
-                          <span className="font-semibold text-slate-200">
-                            9. Supporting Telemetry Evidence:{' '}
-                          </span>
-                          <span className="font-mono text-[11px] text-amber-300">
+                          <p className="font-mono text-[11px] text-amber-300 leading-relaxed">
                             {d.supportingEvidence}
+                          </p>
+                          <p className="text-slate-400 text-[11px] leading-relaxed">
+                            Actions taken: {d.actionsTaken}
+                          </p>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-slate-900/50 border border-slate-800/80 space-y-1">
+                          <span className="text-[11px] font-semibold text-emerald-400 block">
+                            5. What kind of new scenario should be generated?
                           </span>
+                          <p className="text-slate-300 text-[11px] leading-relaxed">
+                            {d.failureCategory.includes('Elevator')
+                              ? 'Generate multi-floor elevator fault/unavailable stress scenario testing primary-to-backup lift recovery and safe floor transitions.'
+                              : d.failureCategory.includes('Collision') ||
+                                d.failureCategory.includes('Yield')
+                              ? 'Generate high-density crossing & group pedestrian scenario around bottleneck coordinates with tighter TTC encounter windows.'
+                              : d.failureCategory.includes('Blocked') ||
+                                d.failureCategory.includes('Deadlock')
+                              ? 'Generate multi-zone construction barricade scenario forcing early global A* detour replanning.'
+                              : 'Generate targeted adverse-condition synthetic scenario with seeded pedestrian & obstacle perturbations.'}
+                          </p>
                         </div>
                       </div>
 
-                      {/* Field 10: Suggested Improvement */}
+                      {/* Diagnostic Question 6: What policy behavior needs improvement? */}
                       <div className="pt-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-slate-800/70">
                         <div className="text-xs text-cyan-300 flex items-start gap-1.5">
                           <Wrench className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
                           <span>
-                            <strong>10. Suggested Improvement:</strong> {d.suggestedImprovement}
+                            <strong>6. What policy behavior needs improvement?</strong>{' '}
+                            {d.suggestedImprovement}
                           </span>
                         </div>
                         <button

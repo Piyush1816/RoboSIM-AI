@@ -3,13 +3,14 @@ import { Sidebar } from './components/layout/Sidebar';
 import { TopNavBar } from './components/layout/TopNavBar';
 import {
   DELIVERY_LOCATIONS,
-  ROBOT_UNITS,
+  formatRobotHardwareSummary,
 } from './data/campusConfig';
 import { ExperimentHistoryPage } from './pages/ExperimentHistoryPage';
 import { FailureAnalysisPage } from './pages/FailureAnalysisPage';
 import { OverviewPage } from './pages/OverviewPage';
 import { PerformanceAnalyticsPage } from './pages/PerformanceAnalyticsPage';
 import { PolicyBenchmarkingPage } from './pages/PolicyBenchmarkingPage';
+import { RobotConfigPage } from './pages/RobotConfigPage';
 import { RobotPoliciesPage } from './pages/RobotPoliciesPage';
 import { ScenarioGeneratorPage } from './pages/ScenarioGeneratorPage';
 import { SimulationLabPage } from './pages/SimulationLabPage';
@@ -37,6 +38,10 @@ function RoboSimWorkspace() {
     policyAnalytics,
     scenarios,
     policies,
+    robots,
+    selectedRobotId,
+    activeRobot,
+    setSelectedRobotId,
     demoPreviewEnabled,
     setDemoPreviewEnabled,
     recordExperiment,
@@ -45,20 +50,20 @@ function RoboSimWorkspace() {
     updatePolicies,
     candidatePolicyState,
     benchmarkHistory,
+    crossRobotBenchmarks,
   } = useExperimentStore();
 
   // Active simulation selections
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>(
     'scen-construction-detour'
   );
-  const [selectedRobotId, setSelectedRobotId] = useState<string>('bot-rover-01');
   const [selectedPolicyId, setSelectedPolicyId] = useState<string>('pol-hybrid-safe');
 
   // Live telemetry state
   const [telemetry, setTelemetry] = useState<LiveTelemetry>({
     simulationState: 'idle',
-    robotId: 'bot-rover-01',
-    robotName: 'CortexRover X1',
+    robotId: activeRobot.id,
+    robotName: activeRobot.name,
     robotStatus: 'Standby',
     originName: 'Robotics Lab North Dock',
     currentDestination: 'Hostel A Courtyard Locker (HST-N1)',
@@ -81,11 +86,6 @@ function RoboSimWorkspace() {
   const activeScenario = useMemo(
     () => scenarios.find((s) => s.id === selectedScenarioId) ?? scenarios[0],
     [scenarios, selectedScenarioId]
-  );
-
-  const activeRobot = useMemo(
-    () => ROBOT_UNITS.find((r) => r.id === selectedRobotId) ?? ROBOT_UNITS[0],
-    [selectedRobotId]
   );
 
   const activePolicy = useMemo(
@@ -116,6 +116,9 @@ function RoboSimWorkspace() {
         scenarioSeed: payload.scenarioSeed ?? activeScenario.randomSeed ?? 101,
         robotId: payload.robotId || activeRobot.id,
         robotName: payload.robotName || activeRobot.name,
+        robotHardwareSummary:
+          payload.robotHardwareSummary ?? formatRobotHardwareSummary(activeRobot),
+        payloadKg: payload.payloadKg,
         policyId: payload.policyId || activePolicy.id,
         policyName: payload.policyName || activePolicy.name,
         policyVersion: payload.policyVersion ?? activePolicy.version,
@@ -225,7 +228,8 @@ function RoboSimWorkspace() {
         totalExperimentsCount={experiments.length}
         failedCount={failures.length}
         isPolicyTrained={candidatePolicyState.isTrained}
-        benchmarksCount={benchmarkHistory.length}
+        benchmarksCount={benchmarkHistory.length + crossRobotBenchmarks.length}
+        robotsCount={robots.length}
       />
 
       {/* Right Main Workspace */}
@@ -264,12 +268,19 @@ function RoboSimWorkspace() {
               onChangeScenario={setSelectedScenarioId}
               onChangeRobot={setSelectedRobotId}
               onChangePolicy={setSelectedPolicyId}
+              onNavigate={setActivePage}
               telemetry={telemetry}
               onTelemetryUpdate={setTelemetry}
               logs={logs}
               onLogEvent={handleLogEvent}
               onSimulationComplete={handleSimulationComplete}
             />
+          )}
+
+          {activePage === 'robot-config' && (
+            <div className="h-full overflow-y-auto p-6">
+              <RobotConfigPage onNavigate={setActivePage} />
+            </div>
           )}
 
           {activePage === 'scenario-generator' && (

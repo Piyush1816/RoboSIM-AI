@@ -1,6 +1,7 @@
 export type NavPageId =
   | 'overview'
   | 'simulation-lab'
+  | 'robot-config'
   | 'scenario-generator'
   | 'failure-analysis'
   | 'robot-policies'
@@ -64,6 +65,18 @@ export interface PredictedConflictPoint {
   confidence: number;
 }
 
+export type ElevatorMachineState =
+  | 'IDLE'
+  | 'DOORS_OPENING'
+  | 'BOARDING'
+  | 'DOORS_CLOSING'
+  | 'MOVING_UP'
+  | 'MOVING_DOWN'
+  | 'DOORS_OPENING_AT_DESTINATION'
+  | 'EXITING'
+  | 'OUT_OF_SERVICE'
+  | 'STUCK';
+
 export type ElevatorState =
   | 'Available'
   | 'Approaching'
@@ -71,6 +84,9 @@ export type ElevatorState =
   | 'Boarding'
   | 'Doors Closing'
   | 'Moving'
+  | 'Moving Up'
+  | 'Moving Down'
+  | 'Doors Opening at Destination'
   | 'Exiting'
   | 'Delayed'
   | 'Stuck'
@@ -105,7 +121,12 @@ export interface CampusElevatorConfig {
   cabinPos: Vector2D;
   /** Direction the single elevator doorway faces toward the indoor lobby */
   doorwayFacing: 'south' | 'north' | 'east' | 'west';
-  /** Destination floor internal corridor waypoints from upper lobby to delivery room */
+  /** First-floor internal corridor waypoints from 1F lobby to 1F delivery room */
+  firstFloorCorridorWaypoints?: Vector2D[];
+  /** First-floor indoor destination room / delivery point */
+  firstFloorRoomPos?: Vector2D;
+  firstFloorRoomName?: string;
+  /** Second-floor internal corridor waypoints from 2F lobby to 2F delivery room */
   upperCorridorWaypoints: Vector2D[];
   /** Final indoor destination room / delivery point on the upper floor */
   destinationRoomPos: Vector2D;
@@ -133,6 +154,7 @@ export interface ElevatorUnitStatus {
   doorwayFacing?: 'south' | 'north' | 'east' | 'west';
   doorOpenProgress?: number; // 0 = closed, 1 = open
   state: ElevatorState;
+  machineState?: ElevatorMachineState;
   currentFloor: number; // 0 = Ground, 1 = First, 2 = Second
   targetFloor: number;
   floorHeightM?: number;
@@ -179,6 +201,12 @@ export interface DeliveryLocation {
   position: [number, number, number];
   type: 'delivery' | 'charging';
   priority: 'Standard' | 'Priority' | 'Lab Sample';
+  /** Floor index: 0 = Ground Floor, 1 = First Floor (3.6m), 2 = Second Floor (7.2m) */
+  floor?: number;
+  /** Whether the location is inside a multi-floor building */
+  isIndoor?: boolean;
+  /** Associated elevator ID if located inside an elevator-equipped building */
+  elevatorId?: string;
 }
 
 export interface ConstructionZoneConfig {
@@ -190,18 +218,67 @@ export interface ConstructionZoneConfig {
   severity: 'Partial Lane Closure' | 'Full Pathway Blockade' | 'Sensor Hazard Zone';
 }
 
+export type RobotCategory =
+  | 'courier'
+  | 'heavy-logistics'
+  | 'express-medical'
+  | 'custom';
+
+export type WheelConfigurationType =
+  | 'Quad-Wheel Skid/Ackermann'
+  | '6-Wheel Heavy Differential'
+  | 'Compact 4-Wheel Omni/Express';
+
 export interface RobotUnitConfig {
   id: string;
   name: string;
   model: string;
+  description?: string;
+  intendedApplication?: string;
+  category?: RobotCategory;
   chassisColor: string;
   accentColor: string;
+  /** Physical Dimensions */
+  lengthM?: number;
+  widthM?: number;
+  heightM?: number;
+  weightKg?: number;
+  collisionRadiusM?: number;
+  /** Mobility & Kinematics */
   maxSpeedMps: number;
-  batteryCapacityWh: number;
-  sensorSuite: string;
-  assignedPolicyId: string;
+  accelerationMps2?: number;
+  decelerationMps2?: number;
+  emergencyBrakingMps2?: number;
+  turningRadiusM?: number;
+  wheelConfiguration?: WheelConfigurationType;
+  movementType?: string;
+  maxSlopeDeg?: number;
+  /** Payload */
   payloadCapacityKg: number;
+  defaultPayloadKg?: number;
+  payloadSpeedPenaltyFactor?: number;
+  /** Battery & Power */
+  batteryCapacityWh: number;
+  basePowerDrawW?: number;
+  lowBatteryThresholdPct?: number;
+  /** Sensors & Perception */
+  sensorSuite: string;
+  lidarType?: string;
+  lidarRangeM?: number;
+  lidarFovDeg?: number;
+  cameraType?: string;
+  cameraRangeM?: number;
+  ultrasonicRangeM?: number;
+  hasRadar?: boolean;
+  hasThermalCamera?: boolean;
+  hasImuFusion?: boolean;
+  sensorUpdateHz?: number;
+  baseSensorNoiseStdM?: number;
+  assignedPolicyId: string;
+  isCustom?: boolean;
 }
+
+export type RobotHardwareConfig = RobotUnitConfig;
 
 export type ScenarioGenerationSource =
   | 'Preset'
@@ -247,6 +324,9 @@ export interface ScenarioConfig {
   description: string;
   originId: string;
   destinationId: string;
+  originFloor?: number;
+  destinationFloor?: number;
+  elevatorTestCase?: string;
   activeConstructionZones: string[];
   dynamicObstacleCount: number;
   pedestrianDistribution?: PedestrianDistributionConfig;
@@ -272,6 +352,7 @@ export interface ScenarioConfig {
   targetedFailureCategory?: FailureCategory;
   generationReason?: string;
   sourceWeaknessEvidence?: string;
+  sourceExperimentIds?: string[];
   recommendedPolicyId: string;
   isCustom?: boolean;
 }
@@ -327,7 +408,9 @@ export interface FailureDiagnosisRecord {
   policyVersion: string;
   policyId: string;
   policyName: string;
+  robotId?: string;
   robotName: string;
+  robotHardwareSummary?: string;
   /** 4. Failure category */
   failureCategory: FailureCategory;
   failureType: FailureType;
@@ -412,6 +495,8 @@ export interface QLearningObservation {
   currentSpeedRatio: number; // currentSpeed / nominalCruiseSpeed
   pathBlocked: boolean;
   temporaryObstructionPresent: boolean;
+  elevatorAvailable?: boolean;
+  navigationState?: string;
 }
 
 export interface QLearningHyperparameters {
@@ -441,6 +526,7 @@ export interface TrainingEpisodeRecord {
   unnecessaryReplanCount: number;
   waitingTimeSec: number;
   deadlockCount: number;
+  safetyInterventionCount?: number;
   batteryConsumedPct: number;
   epsilonUsed: number;
   actionCounts: Record<QLearningAction, number>;
@@ -452,11 +538,14 @@ export interface CandidatePolicyState {
   name: string;
   version: string;
   basePolicyId: string;
+  trainedRobotId?: string;
+  trainedRobotName?: string;
   isTrained: boolean;
   totalEpisodesTrained: number;
   lastTrainedAt: string | null;
   hyperparameters: QLearningHyperparameters;
   qTable: Record<string, Record<QLearningAction, number>>;
+  perRobotQTables?: Record<string, Record<string, Record<QLearningAction, number>>>;
   stateVisitCounts: Record<string, number>;
   actionDistribution: Record<QLearningAction, number>;
   trainingHistory: TrainingEpisodeRecord[];
@@ -465,7 +554,7 @@ export interface CandidatePolicyState {
 }
 
 // ============================================================================
-// SECTION 9: POLICY BENCHMARKING TYPES
+// SECTION 9: POLICY & CROSS-ROBOT HARDWARE BENCHMARKING TYPES
 // ============================================================================
 
 export interface BenchmarkScenarioComparison {
@@ -484,6 +573,8 @@ export interface BenchmarkScenarioComparison {
     unnecessaryReplanCount: number;
     waitingTimeSec: number;
     deadlockCount: number;
+    safetyInterventions?: number;
+    elevatorFailed?: boolean;
     batteryConsumedPct: number;
     episodeReward: number;
     failureCategory?: FailureCategory;
@@ -498,6 +589,8 @@ export interface BenchmarkScenarioComparison {
     unnecessaryReplanCount: number;
     waitingTimeSec: number;
     deadlockCount: number;
+    safetyInterventions?: number;
+    elevatorFailed?: boolean;
     batteryConsumedPct: number;
     episodeReward: number;
     failureCategory?: FailureCategory;
@@ -516,6 +609,8 @@ export interface BenchmarkAggregateMetrics {
   avgCompletionTimeSec: number;
   avgDistanceMeters: number;
   totalDeadlocks: number;
+  totalSafetyInterventions?: number;
+  elevatorFailuresCount?: number;
   avgWaitingTimeSec: number;
   avgGlobalReplans: number;
   avgUnnecessaryReplans: number;
@@ -526,6 +621,8 @@ export interface BenchmarkAggregateMetrics {
 export interface BenchmarkSuiteResult {
   id: string;
   timestamp: string;
+  robotId?: string;
+  robotName?: string;
   candidatePolicyVersion: string;
   heldOutScenariosCount: number;
   episodesPerScenario: number;
@@ -536,6 +633,47 @@ export interface BenchmarkSuiteResult {
   failureCategoriesRegressed: string[];
   remainingWeaknesses: string[];
   overallSummary: string;
+}
+
+export interface CrossRobotComparisonEntry {
+  robotId: string;
+  robotName: string;
+  robotModel: string;
+  maxSpeedMps: number;
+  payloadCapacityKg: number;
+  batteryCapacityWh: number;
+  lidarRangeM: number;
+  collisionRadiusM: number;
+  sensorSuite: string;
+  payloadCompatible: boolean;
+  episodesCount: number;
+  successRatePct: number;
+  collisionRatePct: number;
+  totalCollisions: number;
+  avgCompletionTimeSec: number;
+  avgDistanceMeters: number;
+  navigationFailuresCount: number;
+  avgGlobalReplans: number;
+  totalSafetyInterventions: number;
+  avgBatteryConsumedPct: number;
+  avgBatteryConsumedWh: number;
+  primaryFailureReasons: string[];
+}
+
+export interface CrossRobotBenchmarkResult {
+  id: string;
+  timestamp: string;
+  scenarioIds: string[];
+  scenarioNames: string[];
+  policyId: string;
+  policyName: string;
+  requestedPayloadKg: number;
+  episodesPerScenario: number;
+  seedBase: number;
+  entries: CrossRobotComparisonEntry[];
+  recommendedRobotId: string;
+  recommendedRobotName: string;
+  recommendationRationale: string;
 }
 
 export type ExperimentRunType = 'Interactive' | 'Batch' | 'Training' | 'Benchmark';
@@ -550,6 +688,8 @@ export interface ExperimentRecord {
   scenarioDifficulty?: ScenarioDifficulty;
   robotId: string;
   robotName: string;
+  robotHardwareSummary?: string;
+  payloadKg?: number;
   policyId: string;
   policyName: string;
   policyVersion?: string;
@@ -557,6 +697,8 @@ export interface ExperimentRecord {
   runType?: ExperimentRunType;
   originName: string;
   destinationName: string;
+  originFloor?: number;
+  destinationFloor?: number;
   status: 'Success' | 'Failed';
   durationSec: number;
   distanceMeters: number;
@@ -564,6 +706,7 @@ export interface ExperimentRecord {
   replanCount: number;
   unnecessaryReplanCount?: number;
   deadlockCount?: number;
+  safetyInterventionCount?: number;
   episodeReward?: number;
   decisionHistory?: string[];
   robotStateBeforeCompletion?: string;
@@ -610,6 +753,8 @@ export interface LiveTelemetry {
   activeAvoidanceLevel?: AvoidanceHierarchyLevel;
   originName: string;
   currentDestination: string;
+  originFloor?: number;
+  destinationFloor?: number;
   batteryLevelPct: number;
   currentSpeedMps: number;
   targetSpeedMps?: number;
@@ -619,6 +764,7 @@ export interface LiveTelemetry {
   elapsedTimeSec: number;
   collisionsCount: number;
   replanCount: number;
+  safetyInterventionCount?: number;
   pedestrianDetectionsCount?: number;
   predictedEncountersCount?: number;
   avoidedEncountersCount?: number;
@@ -641,6 +787,7 @@ export interface LiveTelemetry {
   requiresElevator?: boolean;
   activeElevatorId?: string | null;
   activeElevatorState?: ElevatorState | null;
+  activeElevatorMachineState?: ElevatorMachineState | null;
   elevatorState?: ElevatorState;
   currentFloor?: number;
   currentFloorLabel?: string;

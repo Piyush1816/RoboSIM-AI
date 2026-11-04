@@ -1,12 +1,20 @@
-import { NAVIGATION_POLICIES } from '../data/campusConfig';
+import {
+  formatRobotHardwareSummary,
+  NAVIGATION_POLICIES,
+  ROBOT_UNITS,
+} from '../data/campusConfig';
+import { loadRobots } from '../storage/experimentStorage';
 import {
   BenchmarkAggregateMetrics,
   BenchmarkScenarioComparison,
   BenchmarkSuiteResult,
   CandidatePolicyState,
+  CrossRobotBenchmarkResult,
+  CrossRobotComparisonEntry,
   ExperimentRecord,
   ExperimentRunType,
   NavigationPolicyConfig,
+  RobotUnitConfig,
   ScenarioConfig,
   TrainingEpisodeRecord,
 } from '../types/simulation';
@@ -20,6 +28,8 @@ export interface SingleHeadlessRunOptions {
   scenario: ScenarioConfig;
   policy: NavigationPolicyConfig;
   robotId?: string;
+  robotConfigOverride?: RobotUnitConfig;
+  payloadKgOverride?: number;
   seedOverride?: number;
   runType?: ExperimentRunType;
   candidatePolicyState?: CandidatePolicyState | null;
@@ -47,6 +57,8 @@ export function runSingleHeadlessEpisode(
     scenario,
     policy,
     robotId = 'bot-rover-01',
+    robotConfigOverride,
+    payloadKgOverride,
     seedOverride,
     runType = 'Batch',
     candidatePolicyState = null,
@@ -89,13 +101,20 @@ export function runSingleHeadlessEpisode(
   const controller = new AutonomousNavigationController(
     seededScenario,
     policy,
-    robotId,
+    robotConfigOverride?.id ?? robotId,
     {
       onComplete: (payload) => {
         capturedCompletion = payload;
       },
     }
   );
+
+  if (robotConfigOverride) {
+    controller.setRobotHardwareConfig(robotConfigOverride);
+  }
+  if (payloadKgOverride !== undefined) {
+    controller.setPayloadKg(payloadKgOverride);
+  }
 
   if (candidatePolicyState && (policy.isCandidatePolicy || isTrainingEpisode)) {
     controller.candidatePolicyState = candidatePolicyState;
@@ -110,6 +129,9 @@ export function runSingleHeadlessEpisode(
   }
 
   controller.reset(false, false);
+  if (robotConfigOverride) {
+    controller.setRobotHardwareConfig(robotConfigOverride);
+  }
   controller.start();
 
   const subDt = 0.05;
@@ -139,11 +161,14 @@ export function runSingleHeadlessEpisode(
     isCandidatePolicy: Boolean(policy.isCandidatePolicy),
     originName: controller.getOriginLocation().name,
     destinationName: controller.getTargetLocation().name,
+    originFloor: controller.originFloor,
+    destinationFloor: controller.targetFloor,
     status: 'Failed',
     durationSec: Number(controller.elapsedTimeSec.toFixed(1)),
     distanceMeters: Number(controller.distanceTraveledM.toFixed(1)),
     collisions: controller.collisionsCount,
     replanCount: controller.replanCount,
+    safetyInterventionCount: controller.safetyInterventionCount,
     unnecessaryReplanCount: controller.unnecessaryReplanCount,
     deadlockCount: controller.deadlockCount,
     episodeReward: controller.episodeReward,
@@ -190,6 +215,13 @@ export function runSingleHeadlessEpisode(
     scenarioDifficulty: seededScenario.difficulty ?? 'Moderate',
     robotId: finalCompletion.robotId,
     robotName: finalCompletion.robotName,
+    robotHardwareSummary:
+      finalCompletion.robotHardwareSummary ??
+      formatRobotHardwareSummary(controller.getCurrentRobot()),
+    payloadKg:
+      finalCompletion.payloadKg ??
+      payloadKgOverride ??
+      controller.getCurrentRobot().defaultPayloadKg,
     policyId: finalCompletion.policyId,
     policyName: finalCompletion.policyName,
     policyVersion: finalCompletion.policyVersion ?? policy.version,
@@ -197,11 +229,14 @@ export function runSingleHeadlessEpisode(
     runType,
     originName: finalCompletion.originName,
     destinationName: finalCompletion.destinationName,
+    originFloor: finalCompletion.originFloor,
+    destinationFloor: finalCompletion.destinationFloor,
     status: finalCompletion.status,
     durationSec: finalCompletion.durationSec,
     distanceMeters: finalCompletion.distanceMeters,
     collisions: finalCompletion.collisions,
     replanCount: finalCompletion.replanCount,
+    safetyInterventionCount: finalCompletion.safetyInterventionCount,
     unnecessaryReplanCount: finalCompletion.unnecessaryReplanCount,
     deadlockCount: finalCompletion.deadlockCount,
     episodeReward: finalCompletion.episodeReward,
@@ -466,6 +501,7 @@ export async function executePolicyTrainingLoop(
       batteryConsumedPct: experimentRecord.batteryConsumedPct,
       epsilonUsed,
       actionCounts: completionData.episodeActionCounts,
+      safetyInterventionCount: experimentRecord.safetyInterventionCount ?? 0,
       failureCategory: experimentRecord.failureCategory,
     };
 
@@ -516,6 +552,17 @@ function computeAggregateBenchmarkMetrics(
   const avgBat = records.reduce((s, r) => s + r.batteryConsumedPct, 0) / n;
   const avgReward =
     records.reduce((s, r) => s + (r.episodeReward ?? 0), 0) / n;
+  const totalSafetyInterventions = records.reduce(
+    (s, r) => s + (r.safetyInterventionCount ?? 0),
+    0
+  );
+  const elevatorFailuresCount = records.filter(
+    (r) =>
+      r.status === 'Failed' &&
+      (r.failureCategory === 'Elevator-related failure' ||
+        r.failureType === 'Elevator Mechanical Failure' ||
+        r.failureType === 'Elevator Unavailable')
+  ).length;
 
   return {
     policyId,
@@ -533,6 +580,8 @@ function computeAggregateBenchmarkMetrics(
     avgUnnecessaryReplans: Number(avgUnnecessary.toFixed(2)),
     avgBatteryConsumedPct: Number(avgBat.toFixed(1)),
     avgReward: Number(avgReward.toFixed(1)),
+    totalSafetyInterventions,
+    elevatorFailuresCount,
   };
 }
 
@@ -540,6 +589,7 @@ function computeAggregateBenchmarkMetrics(
  * Section 9: FAIR BASELINE VS. TRAINED POLICY BENCHMARKING
  * Evaluates the Baseline Policy and the Trained Candidate Policy on the
  * EXACT SAME held-out test scenarios and identical random seeds.
+ * Enforces held-out separation by filtering out trainingScenarioIds if overlap exists.
  */
 export async function runFairPolicyBenchmarkSuite(options: {
   heldOutScenarios: ScenarioConfig[];
@@ -561,6 +611,12 @@ export async function runFairPolicyBenchmarkSuite(options: {
     onProgress,
   } = options;
 
+  // Enforce strict held-out separation: exclude training scenarios when non-training scenarios exist
+  const trainingIds = new Set(candidatePolicyState.trainingScenarioIds ?? []);
+  const strictHeldOut = heldOutScenarios.filter((s) => !trainingIds.has(s.id));
+  const evaluationScenarios =
+    strictHeldOut.length > 0 ? strictHeldOut : heldOutScenarios;
+
   const candidatePolicyConfig: NavigationPolicyConfig = {
     id: 'pol-candidate-rl',
     name: candidatePolicyState.name,
@@ -581,10 +637,10 @@ export async function runFairPolicyBenchmarkSuite(options: {
   const scenarioComparisons: BenchmarkScenarioComparison[] = [];
   const allRecordedExperiments: ExperimentRecord[] = [];
 
-  const totalSteps = heldOutScenarios.length * episodesPerScenario * 2;
+  const totalSteps = evaluationScenarios.length * episodesPerScenario * 2;
   let stepCounter = 0;
 
-  for (const scen of heldOutScenarios) {
+  for (const scen of evaluationScenarios) {
     const baseSeed =
       scen.randomSeed ?? scen.pedestrianDistribution?.randomSeed ?? 303;
 
@@ -657,6 +713,8 @@ export async function runFairPolicyBenchmarkSuite(options: {
           deadlockCount: baseRes.experimentRecord.deadlockCount ?? 0,
           batteryConsumedPct: baseRes.experimentRecord.batteryConsumedPct,
           episodeReward: baseRes.experimentRecord.episodeReward ?? 0,
+          safetyInterventions:
+            baseRes.experimentRecord.safetyInterventionCount ?? 0,
           failureCategory: baseRes.experimentRecord.failureCategory,
           failureReason: baseRes.experimentRecord.failureReason,
         },
@@ -674,6 +732,8 @@ export async function runFairPolicyBenchmarkSuite(options: {
           deadlockCount: candRes.experimentRecord.deadlockCount ?? 0,
           batteryConsumedPct: candRes.experimentRecord.batteryConsumedPct,
           episodeReward: candRes.experimentRecord.episodeReward ?? 0,
+          safetyInterventions:
+            candRes.experimentRecord.safetyInterventionCount ?? 0,
           failureCategory: candRes.experimentRecord.failureCategory,
           failureReason: candRes.experimentRecord.failureReason,
         },
@@ -789,7 +849,7 @@ export async function runFairPolicyBenchmarkSuite(options: {
     baselineMetrics.avgGlobalReplans - candidateMetrics.avgGlobalReplans;
 
   const overallSummary = `Evaluated across ${
-    heldOutScenarios.length
+    evaluationScenarios.length
   } held-out test scenarios (${
     baselineRecords.length
   } episodes per policy with identical seeds). Candidate Policy (${
@@ -814,11 +874,19 @@ export async function runFairPolicyBenchmarkSuite(options: {
     1
   )}).`;
 
+  const allRobots = loadRobots();
+  const benchRobot =
+    allRobots.find((r) => r.id === robotId) ??
+    ROBOT_UNITS.find((r) => r.id === robotId) ??
+    ROBOT_UNITS[0];
+
   const benchmarkResult: BenchmarkSuiteResult = {
     id: `BENCH-${Date.now().toString().slice(-6)}`,
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    robotId: benchRobot.id,
+    robotName: benchRobot.name,
     candidatePolicyVersion: candidatePolicyState.version,
-    heldOutScenariosCount: heldOutScenarios.length,
+    heldOutScenariosCount: evaluationScenarios.length,
     episodesPerScenario,
     baselineMetrics,
     candidateMetrics,
@@ -834,3 +902,224 @@ export async function runFairPolicyBenchmarkSuite(options: {
     recordedExperiments: allRecordedExperiments,
   };
 }
+
+/**
+ * PART 5 & PART 11: CROSS-ROBOT HARDWARE BENCHMARKING
+ * Answers: "Which robot configuration performs better in this particular environment?"
+ * Evaluates multiple selected robot hardware profiles on the EXACT SAME scenarios,
+ * random seeds, navigation policy, and mission payload weight.
+ */
+export async function runCrossRobotHardwareBenchmarkSuite(options: {
+  robots: RobotUnitConfig[];
+  scenarios: ScenarioConfig[];
+  policy: NavigationPolicyConfig;
+  candidatePolicyState?: CandidatePolicyState | null;
+  requestedPayloadKg?: number;
+  episodesPerScenario?: number;
+  onProgress?: (completed: number, total: number, label: string) => void;
+}): Promise<{
+  benchmarkResult: CrossRobotBenchmarkResult;
+  recordedExperiments: ExperimentRecord[];
+}> {
+  const {
+    robots,
+    scenarios,
+    policy,
+    candidatePolicyState = null,
+    requestedPayloadKg = 15,
+    episodesPerScenario = 1,
+    onProgress,
+  } = options;
+
+  const evalRobots = robots.length > 0 ? robots : ROBOT_UNITS;
+  const evalScenarios = scenarios.length > 0 ? scenarios.slice(0, 4) : [];
+
+  const entries: CrossRobotComparisonEntry[] = [];
+  const allRecordedExperiments: ExperimentRecord[] = [];
+
+  const totalRuns = evalRobots.length * evalScenarios.length * episodesPerScenario;
+  let completedRuns = 0;
+
+  for (const robot of evalRobots) {
+    const robotRecords: ExperimentRecord[] = [];
+    const payloadCompatible = requestedPayloadKg <= robot.payloadCapacityKg;
+
+    for (const scen of evalScenarios) {
+      const baseSeed =
+        scen.randomSeed ?? scen.pedestrianDistribution?.randomSeed ?? 303;
+
+      for (let ep = 0; ep < episodesPerScenario; ep++) {
+        const seed = ep === 0 ? baseSeed : baseSeed + ep * 43;
+
+        const { experimentRecord } = runSingleHeadlessEpisode({
+          scenario: scen,
+          policy,
+          robotId: robot.id,
+          robotConfigOverride: robot,
+          payloadKgOverride: requestedPayloadKg,
+          seedOverride: seed,
+          runType: 'Benchmark',
+          candidatePolicyState: policy.isCandidatePolicy
+            ? candidatePolicyState
+            : null,
+          isTrainingEpisode: false,
+          useBaselineReactiveMode:
+            policy.id === 'pol-astar-fast' ||
+            Boolean(policy.isReadOnlyBaseline && !policy.isCandidatePolicy),
+        });
+
+        // If the requested mission payload exceeds the robot's structural payload limit,
+        // apply an explicit overload penalty or failure annotation if close to limit
+        if (!payloadCompatible && experimentRecord.status === 'Success') {
+          const overloadFactor = requestedPayloadKg / Math.max(1, robot.payloadCapacityKg);
+          if (overloadFactor > 1.25) {
+            experimentRecord.status = 'Failed';
+            experimentRecord.failureType = 'Battery Depletion';
+            experimentRecord.failureCategory = 'Other or unclassified failure';
+            experimentRecord.failureReason = `Payload Overload (${requestedPayloadKg} kg exceeds ${robot.name} ${robot.payloadCapacityKg} kg capacity by ${Math.round(
+              (overloadFactor - 1) * 100
+            )}%)`;
+          } else {
+            experimentRecord.durationSec = Number(
+              (experimentRecord.durationSec * (1 + (overloadFactor - 1) * 0.35)).toFixed(1)
+            );
+            experimentRecord.batteryConsumedPct = Number(
+              (experimentRecord.batteryConsumedPct * overloadFactor).toFixed(1)
+            );
+          }
+        }
+
+        robotRecords.push(experimentRecord);
+        allRecordedExperiments.push(experimentRecord);
+        completedRuns += 1;
+        onProgress?.(
+          completedRuns,
+          totalRuns,
+          `${robot.name} on ${scen.name} (Seed ${seed}, ${requestedPayloadKg}kg)`
+        );
+        await new Promise((r) => setTimeout(r, 6));
+      }
+    }
+
+    const n = Math.max(1, robotRecords.length);
+    const successes = robotRecords.filter((r) => r.status === 'Success').length;
+    const failedRuns = robotRecords.filter((r) => r.status === 'Failed');
+    const runsWithCollision = robotRecords.filter((r) => r.collisions > 0).length;
+    const totalCollisions = robotRecords.reduce((s, r) => s + r.collisions, 0);
+    const avgCompletionTimeSec = Number(
+      (robotRecords.reduce((s, r) => s + r.durationSec, 0) / n).toFixed(1)
+    );
+    const avgDistanceMeters = Number(
+      (robotRecords.reduce((s, r) => s + r.distanceMeters, 0) / n).toFixed(1)
+    );
+    const avgGlobalReplans = Number(
+      (
+        robotRecords.reduce(
+          (s, r) => s + (r.globalReplanCount ?? r.replanCount ?? 0),
+          0
+        ) / n
+      ).toFixed(2)
+    );
+    const totalSafetyInterventions = robotRecords.reduce(
+      (s, r) => s + (r.safetyInterventionCount ?? 0),
+      0
+    );
+    const avgBatteryConsumedPct = Number(
+      (robotRecords.reduce((s, r) => s + r.batteryConsumedPct, 0) / n).toFixed(1)
+    );
+    const avgBatteryConsumedWh = Number(
+      (((avgBatteryConsumedPct / 100) * robot.batteryCapacityWh)).toFixed(1)
+    );
+
+    const failureReasonsSet = new Set<string>();
+    for (const f of failedRuns) {
+      failureReasonsSet.add(
+        f.failureReason || f.failureCategory || f.failureType || 'Navigation Failure'
+      );
+    }
+    if (!payloadCompatible) {
+      failureReasonsSet.add(
+        `Requested ${requestedPayloadKg}kg exceeds ${robot.payloadCapacityKg}kg capacity`
+      );
+    }
+
+    entries.push({
+      robotId: robot.id,
+      robotName: robot.name,
+      robotModel: robot.model,
+      maxSpeedMps: robot.maxSpeedMps,
+      payloadCapacityKg: robot.payloadCapacityKg,
+      batteryCapacityWh: robot.batteryCapacityWh,
+      lidarRangeM: robot.lidarRangeM ?? 28,
+      collisionRadiusM: robot.collisionRadiusM ?? 0.68,
+      sensorSuite: robot.sensorSuite,
+      payloadCompatible,
+      episodesCount: robotRecords.length,
+      successRatePct: Number(((successes / n) * 100).toFixed(1)),
+      collisionRatePct: Number(((runsWithCollision / n) * 100).toFixed(1)),
+      totalCollisions,
+      avgCompletionTimeSec,
+      avgDistanceMeters,
+      navigationFailuresCount: failedRuns.length,
+      avgGlobalReplans,
+      totalSafetyInterventions,
+      avgBatteryConsumedPct,
+      avgBatteryConsumedWh,
+      primaryFailureReasons: Array.from(failureReasonsSet),
+    });
+  }
+
+  // Rank robots by: 1) payloadCompatible, 2) highest successRatePct, 3) lowest totalCollisions, 4) fastest avgCompletionTimeSec
+  const sortedEntries = [...entries].sort((a, b) => {
+    if (a.payloadCompatible !== b.payloadCompatible) {
+      return a.payloadCompatible ? -1 : 1;
+    }
+    if (b.successRatePct !== a.successRatePct) {
+      return b.successRatePct - a.successRatePct;
+    }
+    if (a.totalCollisions !== b.totalCollisions) {
+      return a.totalCollisions - b.totalCollisions;
+    }
+    return a.avgCompletionTimeSec - b.avgCompletionTimeSec;
+  });
+
+  const best = sortedEntries[0] ?? entries[0];
+  const recommendationRationale = best
+    ? `${best.robotName} achieved the strongest overall performance for a ${requestedPayloadKg} kg payload under ${policy.name}: ${
+        best.successRatePct
+      }% success rate, ${best.totalCollisions} collisions, ${
+        best.avgCompletionTimeSec
+      }s average completion time, ${
+        best.avgBatteryConsumedPct
+      }% (${best.avgBatteryConsumedWh} Wh) average battery drain, and ${
+        best.payloadCompatible
+          ? `full payload compatibility (${best.payloadCapacityKg} kg max capacity)`
+          : `payload capacity constraint (${best.payloadCapacityKg} kg max)`
+      }.`
+    : 'No robot entries evaluated.';
+
+  const benchmarkResult: CrossRobotBenchmarkResult = {
+    id: `RBOT-BENCH-${Date.now().toString().slice(-6)}`,
+    timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    scenarioIds: evalScenarios.map((s) => s.id),
+    scenarioNames: evalScenarios.map((s) => s.name),
+    policyId: policy.id,
+    policyName: policy.name,
+    requestedPayloadKg,
+    episodesPerScenario,
+    seedBase:
+      evalScenarios[0]?.randomSeed ??
+      evalScenarios[0]?.pedestrianDistribution?.randomSeed ??
+      303,
+    entries,
+    recommendedRobotId: best?.robotId ?? evalRobots[0].id,
+    recommendedRobotName: best?.robotName ?? evalRobots[0].name,
+    recommendationRationale,
+  };
+
+  return {
+    benchmarkResult,
+    recordedExperiments: allRecordedExperiments,
+  };
+}
+

@@ -12,6 +12,7 @@ import {
   PedestrianDistributionConfig,
   PredictedConflictPoint,
   PredictionHorizonSec,
+  RobotUnitConfig,
   Vector2D,
 } from '../types/simulation';
 
@@ -92,15 +93,38 @@ export const GRID_DIM = Math.floor((GRID_MAX - GRID_MIN) / CELL_SIZE) + 1; // 77
 export const ROBOT_COLLISION_RADIUS = 0.68;
 
 /**
- * Computes fog visibility distance, LiDAR range noise, and safety buffer from scenario sensorNoiseLevel.
+ * Computes fog visibility distance, LiDAR range noise, and safety buffer from scenario sensorNoiseLevel
+ * and the active robot's hardware sensor suite (lidarRangeM, baseSensorNoiseStdM, radar/thermal fusion).
  */
-export function computePerceptionProfile(sensorNoiseLevel: number): PerceptionProfile {
-  // At 0.03 noise -> ~26.5m visibility; at 0.28 (Dusk Fog) -> ~12.5m; at 0.34 (Multi-Stress) -> ~9.8m
-  const visibilityRangeM = Number(
-    Math.max(7.5, 28.0 * (1.0 - sensorNoiseLevel * 1.95)).toFixed(1)
+export function computePerceptionProfile(
+  sensorNoiseLevel: number,
+  robot?: RobotUnitConfig
+): PerceptionProfile {
+  const baseLidarRange = robot?.lidarRangeM ?? 28.0;
+  const baseHardwareNoise = robot?.baseSensorNoiseStdM ?? 0.03;
+  // Radar + Thermal fusion mitigates low-visibility/fog attenuation
+  const weatherResilienceFactor =
+    (robot?.hasRadar ? 0.14 : 0) + (robot?.hasThermalCamera ? 0.12 : 0);
+  const effectiveNoiseDegradation = Math.max(
+    0.05,
+    sensorNoiseLevel * (1.95 - weatherResilienceFactor)
   );
-  const sensorNoiseStdM = Number((sensorNoiseLevel * 1.4).toFixed(2));
-  const uncertaintySafetyBufferM = Number((sensorNoiseLevel * 2.2).toFixed(2));
+
+  const visibilityRangeM = Number(
+    Math.max(
+      6.5,
+      baseLidarRange * (1.0 - effectiveNoiseDegradation)
+    ).toFixed(1)
+  );
+  const sensorNoiseStdM = Number(
+    (
+      baseHardwareNoise +
+      sensorNoiseLevel * 1.35 * (1.0 - weatherResilienceFactor * 0.6)
+    ).toFixed(2)
+  );
+  const uncertaintySafetyBufferM = Number(
+    (sensorNoiseLevel * 2.2 * (1.0 - weatherResilienceFactor * 0.5)).toFixed(2)
+  );
   const fogDensity = 0.0058 + sensorNoiseLevel * 0.032;
 
   return {
@@ -696,9 +720,9 @@ export function getIndoorBuildingCollisionContext(
   for (const elev of elevatorsToCheck) {
     const cx = elev.cabinPos.x;
     const cz = elev.cabinPos.z;
-    // Enclosed shaft is 2.6m x 2.6m around cabinPos, with 3 solid walls (West, East, North)
-    // and 1 single doorway on the South side (z = cz + 1.35) facing the lobby
-    const shaftHalf = 1.35;
+    // Enclosed shaft is around cabinPos, with 3 solid walls (West, East, North)
+    // and 1 single doorway on the South side facing the lobby
+    const shaftHalf = 1.65;
     const wallThick = 0.2;
 
     // Enforce the 3 solid walls of the enclosed shaft when near this elevator
@@ -752,15 +776,15 @@ export function getIndoorBuildingCollisionContext(
     }
 
     const inGroundCorridorOrCabin =
-      Math.abs(px - cx) <= 1.85 &&
-      pz >= cz - 1.15 &&
-      pz <= elev.outdoorApproachPos.z + 1.0;
+      Math.abs(px - cx) <= 9.5 &&
+      pz >= cz - 2.4 &&
+      pz <= elev.outdoorApproachPos.z + 1.8;
 
     const dest = elev.destinationRoomPos;
-    const minUpperX = Math.min(cx, dest.x) - 1.8;
-    const maxUpperX = Math.max(cx, dest.x) + 1.8;
-    const minUpperZ = Math.min(elev.lobbyPos.z, dest.z) - 1.8;
-    const maxUpperZ = Math.max(elev.lobbyPos.z, dest.z) + 1.8;
+    const minUpperX = Math.min(cx - 8.5, dest.x) - 2.2;
+    const maxUpperX = Math.max(cx + 8.5, dest.x) + 2.2;
+    const minUpperZ = Math.min(cz, elev.lobbyPos.z, dest.z) - 2.4;
+    const maxUpperZ = Math.max(cz, elev.lobbyPos.z, dest.z) + 2.4;
     const inUpperCorridorOrRoom =
       px >= minUpperX && px <= maxUpperX && pz >= minUpperZ && pz <= maxUpperZ;
 
@@ -874,15 +898,55 @@ export function calculatePathDistance(waypoints: Vector2D[]): number {
 }
 
 /**
- * Builds the indoor multi-floor waypoint sequence for an elevator-equipped building:
- * - Ground Floor Indoor Approach: Outdoor Approach -> Building Entrance -> Ground Internal Corridor -> Ground Elevator Lobby -> Single Elevator Doorway -> Elevator Cabin
- * - Upper Floor Indoor Exit: Elevator Cabin (Upper Floor) -> Single Elevator Doorway -> Upper Lobby -> Upper Internal Corridor -> Destination Room
+ * Builds the indoor multi-floor waypoint sequence for an elevator-equipped building
+ * supporting Ground (0), First (1), and Second (2) floors in both directions (up/down)
+ * as well as same-floor indoor corridor routing without entering the elevator shaft.
  */
 export function buildIndoorElevatorRouteWaypoints(
   elevCfg: CampusElevatorConfig,
-  phase: 'enter-to-lobby' | 'board-cabin' | 'exit-to-destination'
+  phase:
+    | 'enter-to-lobby'
+    | 'board-cabin'
+    | 'exit-to-destination'
+    | 'same-floor-indoor',
+  floorNum?: number,
+  customTargetPos?: Vector2D,
+  customStartPos?: Vector2D
 ): Vector2D[] {
+  const fh = elevCfg.floorHeightM;
+
+  if (phase === 'same-floor-indoor') {
+    const fl = floorNum ?? 0;
+    const fy = Number((fl * fh).toFixed(2));
+    const startPt = customStartPos ?? { ...elevCfg.lobbyPos, y: fy, floor: fl };
+    const endPt = customTargetPos ?? { ...elevCfg.destinationRoomPos, y: fy, floor: fl };
+    return [
+      { x: startPt.x, z: startPt.z, y: fy, floor: fl },
+      { x: startPt.x, z: elevCfg.lobbyPos.z, y: fy, floor: fl },
+      { x: elevCfg.lobbyPos.x, z: elevCfg.lobbyPos.z, y: fy, floor: fl },
+      { x: endPt.x, z: elevCfg.lobbyPos.z, y: fy, floor: fl },
+      { x: endPt.x, z: endPt.z, y: fy, floor: fl },
+    ];
+  }
+
   if (phase === 'enter-to-lobby') {
+    const fl = floorNum ?? 0;
+    const fy = Number((fl * fh).toFixed(2));
+    if (fl > 0) {
+      // Starting on an upper floor (1F or 2F) inside the building -> navigate along corridor to lobby
+      const startPt = customStartPos ?? {
+        ...(fl === 1 && elevCfg.firstFloorRoomPos
+          ? elevCfg.firstFloorRoomPos
+          : elevCfg.destinationRoomPos),
+        y: fy,
+        floor: fl,
+      };
+      return [
+        { x: startPt.x, z: startPt.z, y: fy, floor: fl },
+        { x: startPt.x, z: elevCfg.lobbyPos.z, y: fy, floor: fl },
+        { x: elevCfg.lobbyPos.x, z: elevCfg.lobbyPos.z, y: fy, floor: fl },
+      ];
+    }
     return [
       { ...elevCfg.outdoorApproachPos, y: 0, floor: 0 },
       { ...elevCfg.entrancePos, y: 0, floor: 0 },
@@ -890,23 +954,83 @@ export function buildIndoorElevatorRouteWaypoints(
       { ...elevCfg.lobbyPos, y: 0, floor: 0 },
     ];
   }
+
   if (phase === 'board-cabin') {
+    const fl = floorNum ?? 0;
+    const fy = Number((fl * fh).toFixed(2));
     return [
-      { ...elevCfg.lobbyPos, y: 0, floor: 0 },
-      { ...elevCfg.doorwayPos, y: 0, floor: 0 },
-      { ...elevCfg.cabinPos, y: 0, floor: 0 },
+      { ...elevCfg.lobbyPos, y: fy, floor: fl },
+      { ...elevCfg.doorwayPos, y: fy, floor: fl },
+      { ...elevCfg.cabinPos, y: fy, floor: fl },
     ];
   }
-  const destY = elevCfg.destinationFloor * elevCfg.floorHeightM;
-  const destFloor = elevCfg.destinationFloor;
+
+  // phase === 'exit-to-destination'
+  const destFloor = floorNum ?? elevCfg.destinationFloor;
+  const destY = Number((destFloor * fh).toFixed(2));
+
+  if (destFloor === 0) {
+    // Exiting cabin at Ground Floor (0) -> doorway -> lobby -> corridor -> building entrance -> outdoor approach (or indoor ground room)
+    if (
+      customTargetPos &&
+      Math.hypot(
+        customTargetPos.x - elevCfg.lobbyPos.x,
+        customTargetPos.z - elevCfg.lobbyPos.z
+      ) <= 6.5 &&
+      customTargetPos.z < elevCfg.entrancePos.z
+    ) {
+      return [
+        { ...elevCfg.cabinPos, y: 0, floor: 0 },
+        { ...elevCfg.doorwayPos, y: 0, floor: 0 },
+        { ...elevCfg.lobbyPos, y: 0, floor: 0 },
+        { x: customTargetPos.x, z: elevCfg.lobbyPos.z, y: 0, floor: 0 },
+        { x: customTargetPos.x, z: customTargetPos.z, y: 0, floor: 0 },
+      ];
+    }
+    const revGround = [...elevCfg.groundCorridorWaypoints]
+      .reverse()
+      .map((p) => ({ ...p, y: 0, floor: 0 }));
+    return [
+      { ...elevCfg.cabinPos, y: 0, floor: 0 },
+      { ...elevCfg.doorwayPos, y: 0, floor: 0 },
+      { ...elevCfg.lobbyPos, y: 0, floor: 0 },
+      ...revGround,
+      { ...elevCfg.entrancePos, y: 0, floor: 0 },
+      { ...elevCfg.outdoorApproachPos, y: 0, floor: 0 },
+    ];
+  }
+
+  const corridorWps =
+    destFloor === 1 && elevCfg.firstFloorCorridorWaypoints
+      ? elevCfg.firstFloorCorridorWaypoints
+      : elevCfg.upperCorridorWaypoints;
+
+  const defaultRoomPos =
+    destFloor === 1 && elevCfg.firstFloorRoomPos
+      ? elevCfg.firstFloorRoomPos
+      : elevCfg.destinationRoomPos;
+
+  const targetRoom = customTargetPos ?? defaultRoomPos;
+
+  // If targetRoom is on the West side of the lobby (e.g. x < lobbyPos.x), route directly along the corridor
+  if (targetRoom.x < elevCfg.lobbyPos.x - 0.5) {
+    return [
+      { ...elevCfg.cabinPos, y: destY, floor: destFloor },
+      { ...elevCfg.doorwayPos, y: destY, floor: destFloor },
+      { ...elevCfg.lobbyPos, y: destY, floor: destFloor },
+      { x: targetRoom.x, z: elevCfg.lobbyPos.z, y: destY, floor: destFloor },
+      { x: targetRoom.x, z: targetRoom.z, y: destY, floor: destFloor },
+    ];
+  }
+
   return [
     { ...elevCfg.cabinPos, y: destY, floor: destFloor },
-    ...elevCfg.upperCorridorWaypoints.map((p) => ({
+    ...corridorWps.map((p) => ({
       ...p,
       y: destY,
       floor: destFloor,
     })),
-    { ...elevCfg.destinationRoomPos, y: destY, floor: destFloor },
+    { x: targetRoom.x, z: targetRoom.z, y: destY, floor: destFloor },
   ];
 }
 

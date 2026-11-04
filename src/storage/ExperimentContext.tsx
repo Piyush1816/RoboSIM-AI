@@ -11,26 +11,33 @@ import {
   clearStoredExperiments,
   computeOverviewMetrics,
   computePolicyAnalytics,
+  deleteCustomRobot,
   deriveFailureDiagnosesFromExperiments,
   deriveFailureRecordsFromExperiments,
   getActiveExperimentsList,
   loadBenchmarkHistory,
   loadCandidatePolicyState,
+  loadCrossRobotBenchmarkHistory,
   loadDemoPreviewPreference,
   loadFailureDrivenBatches,
   loadPolicies,
+  loadRobots,
   loadScenarios,
+  loadSelectedRobotId,
   loadStoredExperiments,
   OverviewMetricsSummary,
   PolicyAnalyticsSummary,
   resetCandidatePolicyState,
   saveBenchmarkResult,
   saveCandidatePolicyState,
+  saveCrossRobotBenchmarkResult,
+  saveCustomRobot,
   saveCustomScenario,
   saveCustomScenariosBatch,
   saveDemoPreviewPreference,
   saveFailureDrivenBatch,
   savePolicies,
+  saveSelectedRobotId,
   saveStoredExperiment,
   saveStoredExperimentsBatch,
   subscribeToStoreChanges,
@@ -38,12 +45,14 @@ import {
 import {
   BenchmarkSuiteResult,
   CandidatePolicyState,
+  CrossRobotBenchmarkResult,
   ExperimentRecord,
   FailureDiagnosisRecord,
   FailureDrivenGenerationBatch,
   FailureEventRecord,
   FailureWeaknessCluster,
   NavigationPolicyConfig,
+  RobotUnitConfig,
   ScenarioConfig,
 } from '../types/simulation';
 
@@ -57,8 +66,15 @@ interface ExperimentStoreContextValue {
   policyAnalytics: PolicyAnalyticsSummary[];
   scenarios: ScenarioConfig[];
   policies: NavigationPolicyConfig[];
+  robots: RobotUnitConfig[];
+  selectedRobotId: string;
+  activeRobot: RobotUnitConfig;
+  setSelectedRobotId: (robotId: string) => void;
+  saveRobotProfile: (robot: RobotUnitConfig) => RobotUnitConfig[];
+  deleteRobotProfile: (robotId: string) => RobotUnitConfig[];
   candidatePolicyState: CandidatePolicyState;
   benchmarkHistory: BenchmarkSuiteResult[];
+  crossRobotBenchmarks: CrossRobotBenchmarkResult[];
   failureDrivenBatches: FailureDrivenGenerationBatch[];
   demoPreviewEnabled: boolean;
   setDemoPreviewEnabled: (enabled: boolean) => void;
@@ -71,6 +87,7 @@ interface ExperimentStoreContextValue {
   updateCandidatePolicyState: (nextState: CandidatePolicyState) => void;
   resetCandidatePolicy: () => CandidatePolicyState;
   recordBenchmarkResult: (result: BenchmarkSuiteResult) => void;
+  recordCrossRobotBenchmark: (result: CrossRobotBenchmarkResult) => void;
   recordFailureDrivenBatch: (batch: FailureDrivenGenerationBatch) => void;
 }
 
@@ -90,11 +107,18 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
   const [policies, setPolicies] = useState<NavigationPolicyConfig[]>(() =>
     loadPolicies()
   );
+  const [robots, setRobots] = useState<RobotUnitConfig[]>(() => loadRobots());
+  const [selectedRobotIdState, setSelectedRobotIdState] = useState<string>(() =>
+    loadSelectedRobotId()
+  );
   const [candidatePolicyState, setCandidatePolicyState] =
     useState<CandidatePolicyState>(() => loadCandidatePolicyState());
   const [benchmarkHistory, setBenchmarkHistory] = useState<
     BenchmarkSuiteResult[]
   >(() => loadBenchmarkHistory());
+  const [crossRobotBenchmarks, setCrossRobotBenchmarks] = useState<
+    CrossRobotBenchmarkResult[]
+  >(() => loadCrossRobotBenchmarkHistory());
   const [failureDrivenBatches, setFailureDrivenBatches] = useState<
     FailureDrivenGenerationBatch[]
   >(() => loadFailureDrivenBatches());
@@ -107,8 +131,11 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
     setStoredExperiments(loadStoredExperiments());
     setScenarios(loadScenarios());
     setPolicies(loadPolicies());
+    setRobots(loadRobots());
+    setSelectedRobotIdState(loadSelectedRobotId());
     setCandidatePolicyState(loadCandidatePolicyState());
     setBenchmarkHistory(loadBenchmarkHistory());
+    setCrossRobotBenchmarks(loadCrossRobotBenchmarkHistory());
     setFailureDrivenBatches(loadFailureDrivenBatches());
     setDemoPreviewState(loadDemoPreviewPreference());
   }, []);
@@ -228,6 +255,45 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
     setBenchmarkHistory(updated);
   }, []);
 
+  const recordCrossRobotBenchmark = useCallback(
+    (result: CrossRobotBenchmarkResult) => {
+      const updated = saveCrossRobotBenchmarkResult(result);
+      setCrossRobotBenchmarks(updated);
+    },
+    []
+  );
+
+  const setSelectedRobotId = useCallback((robotId: string) => {
+    setSelectedRobotIdState(robotId);
+    saveSelectedRobotId(robotId);
+  }, []);
+
+  const saveRobotProfile = useCallback(
+    (robot: RobotUnitConfig): RobotUnitConfig[] => {
+      const updated = saveCustomRobot(robot);
+      setRobots(updated);
+      return updated;
+    },
+    []
+  );
+
+  const deleteRobotProfile = useCallback(
+    (robotId: string): RobotUnitConfig[] => {
+      const updated = deleteCustomRobot(robotId);
+      setRobots(updated);
+      setSelectedRobotIdState(loadSelectedRobotId());
+      return updated;
+    },
+    []
+  );
+
+  const activeRobot = useMemo(
+    () =>
+      robots.find((r) => r.id === selectedRobotIdState) ??
+      robots[0],
+    [robots, selectedRobotIdState]
+  );
+
   const recordFailureDrivenBatch = useCallback(
     (batch: FailureDrivenGenerationBatch) => {
       const updated = saveFailureDrivenBatch(batch);
@@ -277,8 +343,15 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
       policyAnalytics,
       scenarios,
       policies,
+      robots,
+      selectedRobotId: selectedRobotIdState,
+      activeRobot,
+      setSelectedRobotId,
+      saveRobotProfile,
+      deleteRobotProfile,
       candidatePolicyState,
       benchmarkHistory,
+      crossRobotBenchmarks,
       failureDrivenBatches,
       demoPreviewEnabled,
       setDemoPreviewEnabled,
@@ -291,6 +364,7 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
       updateCandidatePolicyState,
       resetCandidatePolicy,
       recordBenchmarkResult,
+      recordCrossRobotBenchmark,
       recordFailureDrivenBatch,
     }),
     [
@@ -303,8 +377,15 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
       policyAnalytics,
       scenarios,
       policies,
+      robots,
+      selectedRobotIdState,
+      activeRobot,
+      setSelectedRobotId,
+      saveRobotProfile,
+      deleteRobotProfile,
       candidatePolicyState,
       benchmarkHistory,
+      crossRobotBenchmarks,
       failureDrivenBatches,
       demoPreviewEnabled,
       setDemoPreviewEnabled,
@@ -317,6 +398,7 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
       updateCandidatePolicyState,
       resetCandidatePolicy,
       recordBenchmarkResult,
+      recordCrossRobotBenchmark,
       recordFailureDrivenBatch,
     ]
   );

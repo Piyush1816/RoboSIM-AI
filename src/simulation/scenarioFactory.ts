@@ -530,7 +530,7 @@ export function generateFailureDrivenScenarios(
           category = 'Elevator Recovery';
           origin = DELIVERY_LOCATIONS.find((l) => l.id === 'loc-eng-dock') ?? origin;
           dest =
-            DELIVERY_LOCATIONS.find((l) => l.id === 'loc-library-plaza') ?? dest;
+            DELIVERY_LOCATIONS.find((l) => l.id === 'loc-library-2f-vault') ?? dest;
           activeZones = [];
           requiresElevator = true;
           elevatorFaultMode =
@@ -564,14 +564,29 @@ export function generateFailureDrivenScenarios(
       const totalPeds =
         commuterCount + randomCount + crossingCount + groupCount;
       const split: DatasetSplit = k % 2 === 0 ? 'train' : 'test';
+      const catSlug = w.category
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '');
+      const sourceExpIds = experiments
+        .filter(
+          (e) =>
+            e.status === 'Failed' &&
+            (e.failureCategory === w.category ||
+              w.affectedScenarioIds.includes(e.scenarioId))
+        )
+        .map((e) => e.id)
+        .slice(0, 5);
 
       generatedScenarios.push({
-        id: `scen-fd-${seed}-${existingScenarios.length + seqIdx}`,
-        name: `Failure-Driven: ${w.category.split(' ')[0]} Stress #${seqIdx} (${targetDiff})`,
+        id: `scen-fd-${catSlug}-${k + 1}`,
+        name: `Failure-Driven: ${w.category.split(' ')[0]} Stress #${k + 1} (${targetDiff})`,
         category,
         description: reason,
         originId: origin.id,
         destinationId: dest.id,
+        originFloor: origin.floor ?? 0,
+        destinationFloor: dest.floor ?? (requiresElevator ? 2 : 0),
         activeConstructionZones: activeZones,
         dynamicObstacleCount: totalPeds,
         pedestrianDistribution: {
@@ -599,6 +614,7 @@ export function generateFailureDrivenScenarios(
         targetedFailureCategory: w.category,
         generationReason: reason,
         sourceWeaknessEvidence: w.evidenceSummary,
+        sourceExperimentIds: sourceExpIds,
         recommendedPolicyId: 'pol-candidate-rl',
         isCustom: true,
       });

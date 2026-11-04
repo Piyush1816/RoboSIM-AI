@@ -44,6 +44,10 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
 }) => {
   const {
     scenarios,
+    robots,
+    selectedRobotId,
+    activeRobot,
+    setSelectedRobotId,
     candidatePolicyState,
     updateCandidatePolicyState,
     resetCandidatePolicy,
@@ -93,10 +97,16 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
     [scenarios]
   );
 
+  const [confirmReset, setConfirmReset] = useState<boolean>(false);
+
   const trainingHistory = candidatePolicyState.trainingHistory ?? [];
   const totalTrainedEps = trainingHistory.length;
   const trainSuccesses = trainingHistory.filter((e) => e.status === 'Success').length;
   const trainFailures = trainingHistory.filter((e) => e.status === 'Failed').length;
+  const totalSafetyInterventions = trainingHistory.reduce(
+    (s, e) => s + (e.safetyInterventionCount ?? 0),
+    0
+  );
   const avgTrainReward =
     totalTrainedEps > 0
       ? trainingHistory.reduce((s, e) => s + e.totalReward, 0) / totalTrainedEps
@@ -177,7 +187,7 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
       trainingScenarios: activeScens,
       candidatePolicyState,
       episodesCount: episodesToTrain,
-      robotId: 'bot-rover-01',
+      robotId: selectedRobotId,
       onEpisodeTrained: (_epRec, expRec, latestPol, completed, total) => {
         bufferedExperiments.push(expRec);
         updateCandidatePolicyState(latestPol);
@@ -194,7 +204,7 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
     setTrainingStatus('idle');
     onSelectPolicy('pol-candidate-rl');
     setSavedNotice(
-      `Training completed: Candidate Policy updated to v${updatedPolicyState.version} across ${bufferedExperiments.length} simulated episodes and activated.`
+      `Training completed on ${activeRobot.name}: Candidate Policy updated to v${updatedPolicyState.version} across ${bufferedExperiments.length} simulated episodes and activated.`
     );
   };
 
@@ -215,7 +225,10 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
 
   const handleResetQPolicy = () => {
     resetCandidatePolicy();
-    setSavedNotice('Reset Candidate Tabular Q-Learning Policy to untrained initial state.');
+    setConfirmReset(false);
+    setSavedNotice(
+      'Reset Candidate Tabular Q-Learning Policy to untrained initial state.'
+    );
   };
 
   const handleParamChange = (
@@ -236,34 +249,51 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
       <div className="bg-[#0d1322] border border-slate-800 rounded-xl p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div className="space-y-1 max-w-3xl">
           <div className="text-xs font-medium text-cyan-400">
-            TABULAR Q-LEARNING LOOP · HARD SAFETY LAYER ENFORCEMENT · POLICY VERSIONING
+            SOFTWARE DECISION-POLICY TRAINING · HARD SAFETY LAYER ENFORCEMENT
           </div>
           <h2 className="font-display text-xl font-semibold text-slate-100">
-            Robot Policy Learning & Training Center
+            Robot Policy Learning & Training
           </h2>
-          <p className="text-sm text-slate-400">
-            Train the <strong>Candidate Tabular Q-Learning Policy</strong> over discretized
-            pedestrian, TTC, and obstacle observations while keeping the{' '}
-            <strong>Baseline Policy</strong> read-only and hard safety constraints strictly
-            enforced.
+          <p className="text-sm text-slate-300 font-medium">
+            Training improves the robot&apos;s software decision-making policy in simulation. It does not physically modify or train a robot&apos;s motors or hardware.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 shrink-0">
-          <button
-            onClick={handleResetQPolicy}
-            className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Reset Q-Table</span>
-          </button>
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {confirmReset ? (
+            <div className="flex items-center gap-1.5 bg-rose-950/80 border border-rose-500/50 rounded-lg px-2.5 py-1.5 text-xs">
+              <span className="text-rose-200 font-medium">
+                Reset learned Q-table?
+              </span>
+              <button
+                onClick={handleResetQPolicy}
+                className="px-2 py-1 rounded bg-rose-500 hover:bg-rose-400 text-slate-950 font-semibold cursor-pointer"
+              >
+                Confirm Reset
+              </button>
+              <button
+                onClick={() => setConfirmReset(false)}
+                className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmReset(true)}
+              className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Reset Training</span>
+            </button>
+          )}
           {onNavigate && (
             <button
               onClick={() => onNavigate('policy-benchmarking')}
               className="px-3.5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
             >
               <TrendingUp className="w-3.5 h-3.5" />
-              <span>Benchmark Baseline vs Trained</span>
+              <span>Compare Policies (Benchmark)</span>
             </button>
           )}
           <button
@@ -273,6 +303,106 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
             <Play className="w-3.5 h-3.5 fill-current" />
             <span>Test in 3D Simulation Lab</span>
           </button>
+        </div>
+      </div>
+
+      {/* Clear 5-Step Workflow & Plain-Language Explanation */}
+      <div className="bg-[#0d1322] border border-cyan-500/30 rounded-xl p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
+          <div>
+            <h3 className="font-display font-semibold text-sm text-slate-100">
+              How Simulation Policy Learning Works
+            </h3>
+            <p className="text-xs text-slate-400">
+              The learning agent uses failure-driven scenarios to refine high-level navigation decisions while the Hard Safety Layer prevents physical collisions.
+            </p>
+          </div>
+          <span className="font-mono text-xs text-cyan-400">
+            5-Stage Closed-Loop Improvement
+          </span>
+        </div>
+
+        {/* 5-Stage Visual Pipeline */}
+        <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5 text-xs">
+          {[
+            {
+              step: '1',
+              title: 'Failed Simulation Experience',
+              desc: 'Edge-case runs expose deadlocks, delays, or excessive replanning.',
+            },
+            {
+              step: '2',
+              title: 'Learning Agent',
+              desc: 'Tabular Q-Learning observes pedestrian distance, TTC, and corridor hazards.',
+            },
+            {
+              step: '3',
+              title: 'Updated Candidate Policy',
+              desc: 'Updates Q-table values to favor smooth speed regulation or local bypass.',
+            },
+            {
+              step: '4',
+              title: 'New Simulation Episodes',
+              desc: 'Executes multi-episode training runs to verify higher cumulative reward.',
+            },
+            {
+              step: '5',
+              title: 'Policy Evaluation',
+              desc: 'Benchmarks Candidate Policy against Baseline Policy on held-out test scenarios.',
+            },
+          ].map((item) => (
+            <div
+              key={item.step}
+              className="p-3 rounded-lg bg-slate-900/70 border border-slate-800 space-y-1"
+            >
+              <div className="font-mono text-[11px] font-semibold text-cyan-400">
+                Step {item.step} · {item.title}
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                {item.desc}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        {/* Plain-Language Glossary of Key Concepts */}
+        <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-2.5 pt-2 border-t border-slate-800/80 text-[11px]">
+          <div className="p-2.5 rounded bg-slate-900/50 border border-slate-800/80">
+            <strong className="text-slate-200 block">Baseline Policy</strong>
+            <span className="text-slate-400">
+              Frozen reference navigation policy used as a control benchmark.
+            </span>
+          </div>
+          <div className="p-2.5 rounded bg-slate-900/50 border border-slate-800/80">
+            <strong className="text-cyan-300 block">Candidate Policy</strong>
+            <span className="text-slate-400">
+              Trainable software policy updated after each learning episode.
+            </span>
+          </div>
+          <div className="p-2.5 rounded bg-slate-900/50 border border-slate-800/80">
+            <strong className="text-sky-300 block">Training Scenarios</strong>
+            <span className="text-slate-400">
+              Preset and failure-driven scenarios used during Q-learning updates.
+            </span>
+          </div>
+          <div className="p-2.5 rounded bg-slate-900/50 border border-slate-800/80">
+            <strong className="text-emerald-300 block">Learning Episodes</strong>
+            <span className="text-slate-400">
+              Simulated delivery trips where the agent tests decisions and observes outcomes.
+            </span>
+          </div>
+          <div className="p-2.5 rounded bg-slate-900/50 border border-slate-800/80">
+            <strong className="text-amber-300 block">Episode Reward</strong>
+            <span className="text-slate-400">
+              Score rewarding safe goal progress and penalizing stops, replans, or safety overrides.
+            </span>
+          </div>
+          <div className="p-2.5 rounded bg-slate-900/50 border border-slate-800/80">
+            <strong className="text-purple-300 block">Learned Q-Table</strong>
+            <span className="text-slate-400">
+              State-action lookup table mapping sensor observations to best navigation actions.
+            </span>
+          </div>
         </div>
       </div>
 
@@ -386,6 +516,41 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
                 {candidatePolicyState.hyperparameters.explorationRate.toFixed(3)}
               </span>
             </div>
+          </div>
+
+          {/* Target Robot Hardware Profile for Policy Training */}
+          <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-3 space-y-2 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-slate-400 font-medium">
+                Target Robot Hardware Profile:
+              </span>
+              {candidatePolicyState.trainedRobotName && (
+                <span className="text-[11px] font-mono text-cyan-300">
+                  Trained on: {candidatePolicyState.trainedRobotName}
+                </span>
+              )}
+            </div>
+            <select
+              value={selectedRobotId}
+              onChange={(e) => setSelectedRobotId(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100"
+            >
+              {robots.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name} ({r.maxSpeedMps} m/s · {r.payloadCapacityKg} kg ·{' '}
+                  {r.lidarRangeM ?? 28}m LiDAR)
+                </option>
+              ))}
+            </select>
+            {candidatePolicyState.isTrained &&
+              candidatePolicyState.trainedRobotId &&
+              candidatePolicyState.trainedRobotId !== selectedRobotId && (
+                <div className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-2.5 py-1.5">
+                  Note: Current Q-table was last trained on{' '}
+                  <strong>{candidatePolicyState.trainedRobotName}</strong>. Run a training batch on{' '}
+                  <strong>{activeRobot.name}</strong> to adapt Q-values to its speed ({activeRobot.maxSpeedMps} m/s) and footprint (r={(activeRobot.collisionRadiusM ?? 0.68).toFixed(2)}m).
+                </div>
+              )}
           </div>
 
           {/* Q-Learning Hyperparameter Controls */}
@@ -763,7 +928,7 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
             <Bot className="w-5 h-5 text-cyan-400" />
           </div>
 
-          <div className="grid grid-cols-3 gap-2.5 text-xs">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
             <div className="p-3 rounded-lg bg-slate-900/70 border border-slate-800">
               <span className="text-slate-400 block text-[11px]">Episodes Completed</span>
               <span className="font-display font-bold text-lg text-slate-100 tabular-nums">
@@ -780,6 +945,12 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
               <span className="text-slate-400 block text-[11px]">Mean Ep. Reward</span>
               <span className="font-display font-bold text-lg text-cyan-400 tabular-nums">
                 {avgTrainReward.toFixed(1)}
+              </span>
+            </div>
+            <div className="p-3 rounded-lg bg-slate-900/70 border border-slate-800">
+              <span className="text-slate-400 block text-[11px]">Safety Interventions</span>
+              <span className="font-display font-bold text-lg text-amber-400 tabular-nums">
+                {totalSafetyInterventions}
               </span>
             </div>
           </div>

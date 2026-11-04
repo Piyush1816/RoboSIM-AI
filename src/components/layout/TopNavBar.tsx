@@ -19,6 +19,10 @@ const PAGE_TITLES: Record<NavPageId, { title: string; subtitle: string }> = {
     title: 'Simulation Lab',
     subtitle: 'Interactive 3D university campus & real-time autonomous robot testbed',
   },
+  'robot-config': {
+    title: 'Robot Hardware Configuration',
+    subtitle: 'Multi-robot chassis dimensions, mobility kinematics, battery capacity, payload limits & perception sensors',
+  },
   'scenario-generator': {
     title: 'Synthetic Scenario Factory',
     subtitle: 'Generate preset, random, custom, and failure-driven edge-case scenarios & run headless batch evaluations',

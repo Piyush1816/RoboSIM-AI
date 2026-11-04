@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { ROBOT_UNITS } from '../data/campusConfig';
 import { OverviewMetricsSummary } from '../storage/experimentStorage';
+import { useExperimentStore } from '../storage/ExperimentContext';
 import {
   ExperimentRecord,
   FailureEventRecord,
@@ -50,6 +51,8 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
   onNavigate,
   onLaunchScenarioInLab,
 }) => {
+  const { candidatePolicyState, benchmarkHistory } = useExperimentStore();
+
   const {
     totalExperiments,
     successfulDeliveries,
@@ -61,6 +64,58 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
 
   const successRate = successRateFormatted;
   const avgDeliveryTime = avgDeliveryTimeFormatted;
+  const failureDrivenScenariosCount = scenarios.filter(
+    (s) => s.generationSource === 'Failure-Driven'
+  ).length;
+
+  // Determine Next Recommended Action in the 5-stage loop
+  const nextRecommendedAction = (() => {
+    if (totalExperiments === 0) {
+      return {
+        stage: 'Stage 2 · Simulation Lab',
+        title: 'Run Your First Simulation or Headless Batch',
+        reason:
+          'No simulation episodes have been recorded yet. Evaluate a robot policy in the 3D Simulation Lab or run a Headless Batch in the Scenario Factory to collect baseline telemetry.',
+        cta: 'Open Simulation Lab',
+        targetPage: 'simulation-lab' as NavPageId,
+      };
+    }
+    if (failures.length > 0 && failureDrivenScenariosCount === 0) {
+      return {
+        stage: 'Stage 3 · Failure Analysis',
+        title: 'Inspect Failure Root Causes & Synthesize Targeted Scenarios',
+        reason: `${failures.length} failure event(s) detected. Analyze root causes and synthesize failure-driven edge-case scenarios targeting those exact weaknesses.`,
+        cta: 'Open Failure Analysis',
+        targetPage: 'failure-analysis' as NavPageId,
+      };
+    }
+    if (!candidatePolicyState.isTrained) {
+      return {
+        stage: 'Stage 4 · Policy Training',
+        title: 'Train Candidate Q-Learning Policy on Failure Scenarios',
+        reason:
+          'The Candidate Q-Learning Policy is currently untrained. Run training episodes to update the Q-table weights while enforcing the hard safety layer.',
+        cta: 'Open Policy Training',
+        targetPage: 'robot-policies' as NavPageId,
+      };
+    }
+    if (benchmarkHistory.length === 0) {
+      return {
+        stage: 'Stage 5 · Policy Comparison',
+        title: 'Run Fair Side-by-Side Held-Out Policy Benchmark',
+        reason: `Candidate Policy (${candidatePolicyState.version}) has been trained for ${candidatePolicyState.totalEpisodesTrained} episodes. Compare it against the Baseline Policy on held-out test scenarios with identical seeds.`,
+        cta: 'Open Policy Comparison',
+        targetPage: 'policy-benchmarking' as NavPageId,
+      };
+    }
+    return {
+      stage: 'Complete Loop · Ready for Iteration',
+      title: 'Inspect Held-Out Benchmark Results or Generate New Stress Cases',
+      reason: `Closed-loop verification complete (${benchmarkHistory.length} benchmark suite(s) run). Review before/after policy metrics or synthesize harder edge cases.`,
+      cta: 'View Policy Comparison',
+      targetPage: 'policy-benchmarking' as NavPageId,
+    };
+  })();
 
   const metrics = [
     {
@@ -89,7 +144,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
       subtext:
         totalExperiments === 0
           ? 'Zero failures logged'
-          : 'Terminated by collision or deadlock',
+          : 'Terminated by collision, fault, or timeout',
       accent: failedDeliveries > 0 ? 'text-rose-400' : 'text-slate-200',
     },
     {
@@ -123,20 +178,23 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
 
   return (
     <div className="h-full overflow-y-auto p-6 space-y-6">
-      {/* Top Banner: Simulation Lab Quick Access + Data Mode Toggle */}
+      {/* Top Banner: What RoboSim AI Does + Why Failure-Driven Simulation Matters */}
       <div className="bg-[#0d1322] border border-slate-800 rounded-xl p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-        <div className="space-y-1.5 max-w-2xl">
+        <div className="space-y-1.5 max-w-3xl">
           <div className="flex items-center gap-2 text-xs text-cyan-400 font-medium">
-            <span>SYNTHETIC CAMPUS TESTBED</span>
+            <span>ROBOSIM AI</span>
             <span aria-hidden="true">·</span>
-            <span>PHYSICAL AI EVALUATION PIPELINE</span>
+            <span>FAILURE-DRIVEN SYNTHETIC SCENARIO & POLICY VERIFICATION PLATFORM</span>
           </div>
           <h2 className="font-display text-xl font-semibold text-slate-100">
-            Autonomous Delivery Robot Simulation & Policy Verification
+            Closed-Loop Simulation, Failure Diagnosis, Policy Learning & Held-Out Benchmarking
           </h2>
           <p className="text-sm text-slate-400 leading-relaxed">
-            Dispatch autonomous courier robots across a procedural 3D university campus, inject
-            construction blockades and sensor hazards, and evaluate A* navigation policies.
+            Robots often fail in rare, unpredictable real-world edge cases where collecting physical
+            data is expensive. <strong>RoboSim AI</strong> automates the complete simulation-first
+            feedback loop: generating synthetic campus & multi-floor building scenarios, detecting
+            and diagnosing failures, synthesizing targeted retraining scenarios, improving a Tabular
+            Q-Learning + Safety Layer policy, and measuring improvement on held-out test seeds.
           </p>
         </div>
 
@@ -188,58 +246,77 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
         </div>
       )}
 
-      {/* 5-Stage Closed-Loop Failure-Driven Synthetic Scenario & Policy Learning Pipeline */}
-      <div className="bg-[#0d1322] border border-slate-800 rounded-xl p-5 space-y-3.5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* 5-Stage Closed-Loop Workflow + Next Recommended Action */}
+      <div className="bg-[#0d1322] border border-slate-800 rounded-xl p-5 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 border-b border-slate-800/80 pb-3.5">
           <div>
             <div className="text-[11px] font-mono text-emerald-400">
-              CLOSED-LOOP SIMULATION-FIRST WORKFLOW
+              5-STAGE CLOSED-LOOP WORKFLOW
             </div>
             <h3 className="font-display font-semibold text-base text-slate-100">
-              Failure-Driven Synthetic Scenario Generation & Policy Retraining Pipeline
+              Scenario Generation → Simulation → Failure Analysis → Policy Training → Policy Comparison
             </h3>
           </div>
-          <span className="text-xs text-slate-400">
-            Click any stage to execute or inspect live pipeline telemetry
-          </span>
+
+          {/* Next Recommended Action Pill */}
+          <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-lg px-3.5 py-2 flex flex-wrap items-center justify-between gap-3">
+            <div className="text-xs">
+              <span className="font-mono text-[10px] uppercase text-cyan-400 block">
+                Next Recommended Action ({nextRecommendedAction.stage})
+              </span>
+              <span className="font-semibold text-slate-100">
+                {nextRecommendedAction.title}
+              </span>
+            </div>
+            <button
+              onClick={() => onNavigate(nextRecommendedAction.targetPage)}
+              className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+            >
+              <span>{nextRecommendedAction.cta}</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
           {[
             {
-              step: 'STAGE 1',
-              title: 'Synthetic Scenario Factory',
-              desc: `${scenarios.length} active scenarios (${
-                scenarios.filter((s) => s.generationSource === 'Failure-Driven').length
-              } failure-driven)`,
+              step: '1. SCENARIO FACTORY',
+              title: 'Scenario Factory',
+              desc: `${scenarios.length} scenarios (${failureDrivenScenariosCount} failure-driven) with seeded parameters`,
               page: 'scenario-generator' as NavPageId,
               accent: 'border-cyan-500/35 hover:border-cyan-400 text-cyan-400',
             },
             {
-              step: 'STAGE 2',
-              title: 'Evaluate in Simulation',
-              desc: `${totalExperiments} episodes evaluated across 3D & headless batch runner`,
+              step: '2. SIMULATION LAB',
+              title: 'Simulation Lab',
+              desc: `${totalExperiments} episodes run across 3D campus & multi-floor elevators`,
               page: 'simulation-lab' as NavPageId,
               accent: 'border-sky-500/35 hover:border-sky-400 text-sky-400',
             },
             {
-              step: 'STAGE 3',
-              title: 'Failure Intelligence',
-              desc: `${failures.length} failures classified into 11 diagnostic categories`,
+              step: '3. FAILURE ANALYSIS',
+              title: 'Failure Analysis',
+              desc: `${failures.length} failures diagnosed across 11 categories with root-cause evidence`,
               page: 'failure-analysis' as NavPageId,
               accent: 'border-rose-500/35 hover:border-rose-400 text-rose-400',
             },
             {
-              step: 'STAGE 4',
-              title: 'Policy Retraining (Q-RL)',
-              desc: 'Train Candidate Policy on failure-driven scenarios with safety layer',
+              step: '4. POLICY TRAINING',
+              title: 'Policy Training',
+              desc: candidatePolicyState.isTrained
+                ? `Candidate v${candidatePolicyState.version} trained (${candidatePolicyState.totalEpisodesTrained} eps)`
+                : 'Tabular Q-Learning + Hard Safety Layer ready for training',
               page: 'robot-policies' as NavPageId,
               accent: 'border-emerald-500/35 hover:border-emerald-400 text-emerald-400',
             },
             {
-              step: 'STAGE 5',
-              title: 'Held-Out Benchmarking',
-              desc: 'Compare Baseline vs Trained Candidate on identical test seeds',
+              step: '5. POLICY COMPARISON',
+              title: 'Policy Comparison',
+              desc:
+                benchmarkHistory.length > 0
+                  ? `${benchmarkHistory.length} held-out benchmark suite(s) verified`
+                  : 'Compare Baseline vs Candidate on held-out test seeds',
               page: 'policy-benchmarking' as NavPageId,
               accent: 'border-amber-500/35 hover:border-amber-400 text-amber-400',
             },

@@ -299,6 +299,9 @@ export const ExperimentHistoryPage: React.FC<ExperimentHistoryPageProps> = ({
                             {exp.policyVersion ?? 'v1.0'}{' '}
                             {exp.isCandidatePolicy ? '[CANDIDATE]' : '[BASELINE]'}
                           </div>
+                          <div className="text-[10px] font-mono text-emerald-400 mt-0.5">
+                            {exp.robotName}
+                          </div>
                         </td>
                         <td className="py-3 px-3 whitespace-nowrap">
                           {exp.status === 'Success' ? (
@@ -363,8 +366,13 @@ export const ExperimentHistoryPage: React.FC<ExperimentHistoryPageProps> = ({
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                               <div className="p-3 rounded-lg bg-[#0d1322] border border-slate-800 space-y-1">
                                 <div className="text-[11px] font-semibold text-cyan-400">
-                                  Robot State & Environmental Conditions
+                                  Robot Hardware & Environmental Conditions
                                 </div>
+                                {exp.robotHardwareSummary && (
+                                  <div className="font-mono text-emerald-300 text-[11px]">
+                                    {exp.robotHardwareSummary}
+                                  </div>
+                                )}
                                 <div className="font-mono text-slate-300 text-[11px]">
                                   {exp.robotStateBeforeCompletion ?? 'Docked / Completed'}
                                 </div>

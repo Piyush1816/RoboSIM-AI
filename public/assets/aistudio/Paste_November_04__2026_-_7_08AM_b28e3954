@@ -1,0 +1,1036 @@
+# ROBOSIM AI — FINAL PRODUCT UPGRADE & IMPLEMENTATION PROMPT
+
+## Project: Failure-Driven Synthetic Scenario Generation & Robot Policy Verification Platform
+
+You are working on an existing React + TypeScript + Three.js application called **RoboSim AI**.
+
+Your task is to audit, improve and complete the existing application into a functional, understandable and technically credible hackathon product.
+
+This is an existing project imported from GitHub. You must work directly on its existing source code.
+
+**DO NOT rebuild the application from scratch. DO NOT replace it with a generic dashboard. DO NOT remove existing working functionality.**
+
+Preserve the existing architecture wherever possible and improve the actual implementation.
+
+---
+
+# PART 1 — UNDERSTAND OUR PRODUCT
+
+## 1.1 Original challenge
+
+Robots frequently fail when exposed to rare, unpredictable and complex real-world situations.
+
+Collecting real-world data for every possible edge case is expensive and difficult.
+
+The challenge is to build a pipeline that:
+
+1. Generates synthetic scenarios.
+2. Evaluates robot policies in simulation.
+3. Identifies and analyzes failures.
+4. Generates new scenarios targeting those failures.
+5. Improves robot policies using failure experiences.
+6. Measures improvements through reproducible benchmarking.
+
+Possible applications include:
+- Warehouse logistics.
+- Hospital delivery.
+- Campus delivery.
+- Industrial automation.
+
+## 1.2 Our solution
+
+RoboSim AI is a failure-driven synthetic scenario generation and robot policy evaluation platform.
+
+Its central innovation is:
+
+**Every robot failure becomes an opportunity to generate a better test and improve future robot behavior.**
+
+The main workflow is:
+
+Scenario Generation → Robot Simulation → Failure Detection → Failure Analysis → Targeted Scenario Generation → Policy Learning → Policy Benchmarking → Feedback Loop.
+
+The 3D campus is our experimental environment. It is not the entire product.
+
+## 1.3 Important distinction
+
+RoboSim AI has two different research capabilities:
+
+**A. Policy Evaluation**
+
+Testing how different software decision-making policies behave on a robot.
+
+**B. Robot Configuration Evaluation**
+
+Testing how different hardware configurations behave in the same environment.
+
+These are separate capabilities and must not be confused.
+
+The platform should support both.
+
+---
+
+# PART 2 — AUDIT THE EXISTING REPOSITORY
+
+Before implementing changes, inspect the actual codebase.
+
+The existing project already contains components related to:
+
+- React and TypeScript frontend.
+- Three.js/WebGL 3D campus.
+- Autonomous delivery robot simulation.
+- A* pathfinding.
+- Dynamic obstacle and pedestrian avoidance.
+- Synthetic scenario generation.
+- Failure analysis.
+- Q-learning and candidate policy.
+- Batch simulation.
+- Policy benchmarking.
+- Experiment history.
+- Analytics.
+- Local storage.
+
+The repository also has three existing robot profiles:
+
+1. CortexRover X1.
+2. OmniStride S4.
+3. SwiftPulse A2.
+
+Inspect the existing robot configuration definitions, particularly the existing campus configuration and simulation modules.
+
+Audit:
+
+- Robot configuration architecture.
+- Robot movement and physics.
+- Robot collision detection.
+- Sensor simulation.
+- Navigation and pathfinding.
+- Elevator system.
+- Scenario generation.
+- Failure recording.
+- Policy training.
+- Benchmarking.
+- Shared state and persistence.
+- Existing UI components.
+
+First report:
+1. What is genuinely implemented.
+2. What is partially implemented.
+3. What is currently broken.
+4. What needs to be improved.
+5. Which files and modules will be modified.
+
+Then proceed with implementation in the priority order below.
+
+Do not stop after producing an audit unless a critical architectural issue makes implementation impossible.
+
+---
+
+# PART 3 — MULTI-ROBOT HARDWARE CONFIGURATION SYSTEM
+
+THIS IS A MAJOR PRODUCT REQUIREMENT.
+
+RoboSim AI should not be limited to testing a single generic delivery robot.
+
+A user must be able to select different robot types, each with its own hardware configuration, and test how those configurations perform in the same simulation environment.
+
+Create a proper modular robot configuration architecture.
+
+## 3.1 Existing robot profiles
+
+Preserve and expand these three existing profiles.
+
+### Robot 1: CortexRover X1
+
+Purpose: General-purpose autonomous courier.
+
+Existing profile:
+- Maximum speed: 3.2 m/s.
+- Payload capacity: 25 kg.
+- Battery capacity: 840 Wh.
+- Sensors: 360-degree LiDAR, stereo RGB-D camera and ultrasonic sensors.
+
+### Robot 2: OmniStride S4
+
+Purpose: Heavy-duty warehouse and logistics robot.
+
+Existing profile:
+- Maximum speed: 2.6 m/s.
+- Payload capacity: 40 kg.
+- Battery capacity: 1120 Wh.
+- Sensors: Dual 64-channel LiDAR, thermal camera and radar.
+
+### Robot 3: SwiftPulse A2
+
+Purpose: Compact express-delivery robot.
+
+Existing profile:
+- Maximum speed: 4.0 m/s.
+- Payload capacity: 15 kg.
+- Battery capacity: 680 Wh.
+- Sensors: High-frequency LiDAR, event camera and IMU fusion.
+
+Preserve these existing values unless the code demonstrates a conflicting implemented specification that needs reconciliation.
+
+Do not randomly change existing robot specifications.
+
+## 3.2 Create a unified RobotHardwareConfig architecture
+
+Create a strongly typed, reusable configuration model.
+
+Each robot should have parameters such as:
+
+**Identity**
+- Robot ID.
+- Robot name.
+- Description.
+- Intended application.
+- Robot category.
+
+**Physical dimensions**
+- Length.
+- Width.
+- Height.
+- Weight.
+- Collision footprint.
+
+**Mobility**
+- Maximum speed.
+- Acceleration.
+- Deceleration.
+- Braking distance or braking model.
+- Turning radius.
+- Wheel configuration.
+- Movement type.
+- Maximum slope, if supported.
+
+**Payload**
+- Maximum payload.
+- Current payload.
+- Payload-related movement limitations.
+
+**Battery**
+- Battery capacity.
+- Current battery charge.
+- Estimated energy consumption.
+- Low-battery threshold.
+
+**Sensors**
+- LiDAR type.
+- LiDAR range.
+- LiDAR field of view.
+- Camera type.
+- Camera range or field of view, if modeled.
+- Ultrasonic sensor range.
+- Radar configuration.
+- IMU availability.
+- Sensor update frequency.
+- Sensor noise and uncertainty.
+
+Use optional fields where a particular robot does not possess a particular sensor.
+
+Do not give every robot identical sensor configurations.
+
+## 3.3 Hardware configuration must affect actual simulation
+
+This is the most important part.
+
+Selecting another robot must change its actual simulated behavior.
+
+Implement the following:
+
+| Configuration | Actual simulation effect |
+|---|---|
+| Maximum speed | Limits achievable robot velocity |
+| Acceleration | Controls how quickly the robot accelerates |
+| Braking | Changes stopping behavior |
+| Physical dimensions | Changes collision footprint |
+| Turning radius | Restricts turning behavior |
+| Payload | Validates load capacity and affects performance if modeled |
+| Battery capacity | Changes available operating energy |
+| LiDAR range | Affects obstacle detection distance |
+| Camera configuration | Affects available perception observations if modeled |
+| Sensor noise | Changes perception uncertainty |
+| Wheel configuration | Influences movement constraints where supported |
+
+For example:
+
+- A heavy logistics robot should have a larger collision footprint and lower acceleration.
+- A compact delivery robot should have a smaller footprint and be able to navigate narrower spaces.
+- A robot with shorter LiDAR range should detect obstacles later.
+- A robot carrying a heavy payload should respect its load limit.
+
+Do not implement these differences only in the user interface.
+
+They must be consumed by the actual simulation engine.
+
+Do not claim detailed physical realism unless implemented. Use clearly defined parameterized approximations where necessary.
+
+## 3.4 Robot-specific 3D representation
+
+The three robots should be visually distinguishable.
+
+Improve the existing Three.js representation.
+
+Where practical, represent differences in:
+- Chassis dimensions.
+- Wheel layout.
+- Sensor placement.
+- Sensor housings.
+- Robot height.
+- Body shape.
+
+Do not merely change material colours.
+
+Use procedural Three.js geometry or existing project assets where appropriate.
+
+Maintain performance and avoid unnecessarily complex models.
+
+## 3.5 Custom robot profiles
+
+Add the ability to create a custom robot configuration.
+
+The user should be able to:
+- Create a new robot profile.
+- Enter its hardware specifications.
+- Configure its sensors.
+- Save it.
+- Select it for simulation.
+- Edit or duplicate it.
+- Delete custom profiles with confirmation.
+
+Validate all inputs.
+
+Do not allow invalid configurations such as negative dimensions, negative sensor ranges or payload values outside valid limits.
+
+Preserve the three default robot profiles.
+
+Store custom profiles using the existing persistence architecture.
+
+---
+
+# PART 4 — ROBOT CONFIGURATION USER EXPERIENCE
+
+Create a clean Robot Configuration experience.
+
+It can be a dedicated page or a clearly accessible configuration panel, depending on the existing architecture.
+
+The user should see three predefined robots and any custom robots.
+
+For every robot, display:
+
+- Robot name.
+- Robot type.
+- Intended use.
+- 3D preview.
+- Maximum speed.
+- Payload capacity.
+- Battery capacity.
+- Sensor configuration.
+- Physical dimensions.
+
+Allow the user to select a robot and inspect its complete hardware configuration.
+
+Provide a clear action:
+
+"Select Robot for Simulation"
+
+The selected robot must remain synchronized across:
+
+- Simulation Lab.
+- Policy Training.
+- Policy Comparison.
+- Experiment History.
+- Performance Analytics.
+
+Avoid separate disconnected robot selections on different pages.
+
+Use one shared selected-robot state.
+
+Make the selected robot visible in the Simulation Lab.
+
+---
+
+# PART 5 — CROSS-ROBOT PERFORMANCE COMPARISON
+
+Introduce a capability to compare different robot configurations under equivalent conditions.
+
+This is different from policy comparison.
+
+## 5.1 Cross-Robot Testing
+
+Allow the user to select multiple robots and execute the same scenario against each robot.
+
+Use:
+- Same scenario configuration.
+- Same random seed.
+- Same starting conditions.
+- Same destination.
+- Comparable simulation settings.
+
+Record actual results separately for each robot.
+
+Compare:
+
+- Success rate.
+- Collision rate.
+- Completion time.
+- Path length.
+- Navigation failures.
+- Replanning events.
+- Safety interventions.
+- Battery consumption, if modeled.
+- Payload compatibility.
+
+The comparison should answer:
+
+"Which robot configuration performs better in this particular environment?"
+
+Do not fabricate benchmark data.
+
+If the comparison has not been executed, show a clear pending state.
+
+## 5.2 Keep robot and policy comparisons separate
+
+**Robot comparison:**
+
+Same or equivalent policy, different hardware configurations.
+
+Question: Which robot performs better?
+
+**Policy comparison:**
+
+Same robot configuration, different decision-making policies.
+
+Question: Which policy performs better?
+
+Design the benchmarking architecture to support both experiments without mixing their results.
+
+---
+
+# PART 6 — FIX THE ELEVATOR SYSTEM
+
+The existing elevator implementation is still not functioning correctly in normal operation.
+
+The elevator cabin is not physically travelling between floors.
+
+Inspect the actual runtime logic.
+
+Do not simply change the elevator status label.
+
+## 6.1 Required physical behavior
+
+The elevator should have:
+
+- A vertical shaft inside the building.
+- A physical cabin.
+- Floor-specific entrance points.
+- Floor-specific exit points.
+- Doors.
+- Correct floor heights.
+- A valid vertical navigation transition.
+
+The cabin must physically move vertically based on simulation time.
+
+The robot must travel with the cabin without teleportation.
+
+Use synchronized transforms or an appropriate parent-child relationship.
+
+## 6.2 Elevator state machine
+
+Verify the existing states:
+
+1. IDLE.
+2. DOORS_OPENING.
+3. BOARDING.
+4. DOORS_CLOSING.
+5. MOVING_UP.
+6. MOVING_DOWN.
+7. DOORS_OPENING_AT_DESTINATION.
+8. EXITING.
+9. OUT_OF_SERVICE.
+10. STUCK.
+
+Verify that transitions actually execute.
+
+Check for:
+- Stalled state transitions.
+- Incorrect simulation clock handling.
+- Incorrect floor-height calculations.
+- Invalid availability checks.
+- Incorrect robot/cabin transform synchronization.
+- Incorrect destination comparisons.
+- Navigation conditions that cause endless waiting.
+
+## 6.3 Destination-aware routing
+
+- Same-floor destinations must not use the elevator.
+- Different-floor destinations must use a valid lift.
+- Outdoor destinations must use outdoor navigation.
+- If the primary lift fails, use a valid backup lift.
+- If all lifts are unavailable, report a safe failure.
+- If the lift becomes stuck, stop safely and record an incident.
+
+## 6.4 Elevator diagnostics
+
+Keep these tests available:
+
+1. Ground → First Floor.
+2. First → Second Floor.
+3. Second → Ground Floor.
+4. Same-floor navigation.
+5. Outdoor navigation.
+6. Primary lift unavailable, backup available.
+7. Both lifts unavailable.
+8. Lift stuck mid-shaft.
+
+Move these tests into an expandable section named:
+
+"Advanced Elevator Diagnostics"
+
+Keep normal elevator operation as the default.
+
+Provide actual test statuses:
+- Passed.
+- Failed.
+- Running.
+- Not Tested.
+
+Do not mark a test passed simply because a preset was selected.
+
+---
+
+# PART 7 — REDESIGN THE SIMULATION LAB
+
+The current Simulation Lab is too cluttered.
+
+It contains too many controls and technical settings.
+
+Redesign it to be understandable to a first-time user.
+
+## 7.1 Main layout
+
+Create four clear sections.
+
+### A. Simulation Setup
+
+Show:
+- Scenario selection.
+- Robot selection.
+- Delivery destination.
+- Navigation policy.
+
+Robot selection must display the selected robot's name and relevant hardware summary.
+
+### B. Main 3D Simulation View
+
+Make the 3D environment the central focus.
+
+Display:
+- Selected robot.
+- Environment.
+- Obstacles.
+- Pedestrians.
+- Navigation route.
+- Current robot destination.
+
+### C. Live Robot Status
+
+Display only the most useful information:
+
+- Robot name.
+- Current floor.
+- Current destination.
+- Current action.
+- Navigation state.
+- Delivery progress.
+- Battery status, if implemented.
+- Elevator status, when relevant.
+
+### D. Simulation Controls
+
+Provide:
+- Start.
+- Pause.
+- Reset.
+- Simulation speed.
+
+Move technical settings into collapsible Advanced Settings.
+
+These include:
+- LiDAR visualization.
+- Collision bounds.
+- 2D grid.
+- Prediction horizon.
+- Pedestrian behaviour configuration.
+- Detailed telemetry.
+- Other diagnostic controls.
+
+Do not remove existing useful visualization capabilities.
+
+Make them optional.
+
+## 7.2 Simulation clarity
+
+The user should be able to answer immediately:
+
+1. Which robot am I testing?
+2. What scenario is selected?
+3. Where is the robot going?
+4. What is the robot doing?
+5. Did the robot succeed or fail?
+
+Keep the interface focused on those questions.
+
+---
+
+# PART 8 — FIX SCENARIO AND FAILURE MANAGEMENT
+
+Currently, newly failed cases are cluttering the Simulation Lab.
+
+Separate the following entities:
+
+**Scenario Library**
+All available scenarios.
+
+**Active Simulation**
+The currently selected scenario and active execution.
+
+**Completed Experiments**
+Historical simulation runs.
+
+**Failure Analysis**
+Diagnosed failures and their evidence.
+
+**Failure-Driven Scenarios**
+New scenarios generated based on previous failures.
+
+A failed experiment must not automatically become a new active scenario.
+
+Do not duplicate scenarios after every failed episode.
+
+Each scenario and experiment must have a unique ID.
+
+Maintain relationships between:
+- Original scenario.
+- Failed experiment.
+- Failure diagnosis.
+- Generated follow-up scenario.
+- Training session.
+- Benchmark experiment.
+
+Add useful scenario filters:
+- All.
+- Normal.
+- Training.
+- Testing.
+- Failure-Driven.
+
+Provide search and sorting.
+
+Preserve existing experiment history.
+
+---
+
+# PART 9 — FAILURE INTELLIGENCE
+
+Every failure must be based on actual simulation execution.
+
+Capture:
+
+- Scenario ID.
+- Robot ID and hardware configuration.
+- Policy ID.
+- Random seed.
+- Initial and final positions.
+- Robot actions.
+- Sensor observations.
+- Navigation events.
+- Elevator events.
+- Collision events.
+- Completion time.
+- Success or failure.
+- Failure reason.
+
+Classify failures such as:
+
+- Collision.
+- Navigation failure.
+- Unreachable destination.
+- Excessive replanning.
+- Pedestrian avoidance failure.
+- Elevator failure.
+- Sensor uncertainty.
+- Timeout.
+- Deadlock.
+
+Every failure diagnosis should answer:
+
+1. What happened?
+2. Why did it happen?
+3. Which conditions contributed?
+4. What evidence supports the diagnosis?
+5. What new scenario should be generated?
+6. What policy behavior should improve?
+
+The Failure-Driven Scenario Factory must use actual diagnosed failures.
+
+---
+
+# PART 10 — POLICY TRAINING
+
+Clearly distinguish hardware configuration from software policy training.
+
+We are NOT directly training physical robot hardware.
+
+We are training or improving the robot's software decision-making policy inside the simulator.
+
+The Policy Training page must explain this.
+
+## 10.1 Baseline and candidate policies
+
+Baseline Policy:
+Original robot decision-making logic.
+
+Candidate Policy:
+The software policy being improved.
+
+The selected robot's hardware configuration must be used during training.
+
+Do not hardcode the first robot profile.
+
+## 10.2 Genuine learning
+
+Inspect the existing Q-learning implementation.
+
+If it is incomplete, improve it.
+
+The learning agent should interact with the actual simulation.
+
+Observations may include:
+- Obstacle distance.
+- Pedestrian distance.
+- Relative pedestrian movement.
+- Time to collision.
+- Current speed.
+- Path status.
+- Elevator availability.
+- Navigation state.
+
+Possible actions:
+- Maintain speed.
+- Slow down.
+- Stop.
+- Local obstacle avoidance.
+- Request global replanning.
+
+Use reward feedback from actual simulation outcomes.
+
+Update actual Q-values or equivalent learned parameters.
+
+Persist learned parameters.
+
+Use an independent safety layer to override unsafe actions.
+
+## 10.3 Robot-specific policy handling
+
+A policy must be associated with the robot configuration it was trained and evaluated on.
+
+Prevent accidental use of a policy with an incompatible robot configuration.
+
+Support separate training sessions for different robots.
+
+Where appropriate, allow policy reuse only after compatibility checks.
+
+## 10.4 Training interface
+
+Show:
+- Selected robot.
+- Selected hardware profile.
+- Selected candidate policy.
+- Training scenarios.
+- Number of episodes.
+- Actual training progress.
+- Reward trend.
+- Success/failure counts.
+- Safety interventions.
+- Learned parameters.
+
+Do not fake training curves or artificially improve reward values.
+
+If the implementation is parameter optimization rather than actual reinforcement learning, label it accurately.
+
+---
+
+# PART 11 — POLICY AND ROBOT BENCHMARKING
+
+Provide two distinct benchmark workflows.
+
+## A. Policy Benchmarking
+
+Same robot hardware, different policies.
+
+Compare baseline versus candidate on identical held-out test scenarios and random seeds.
+
+Metrics:
+- Success rate.
+- Collision rate.
+- Navigation failure rate.
+- Completion time.
+- Path length.
+- Replanning events.
+- Safety interventions.
+
+## B. Robot Configuration Benchmarking
+
+Different robot hardware configurations, comparable conditions.
+
+Compare selected robots on identical scenarios.
+
+Metrics:
+- Success rate.
+- Collision rate.
+- Completion time.
+- Navigation failures.
+- Path length.
+- Battery consumption, if implemented.
+- Payload compatibility.
+- Safety interventions.
+
+Keep training and testing scenarios separate.
+
+Do not mix robot-level performance differences with policy-level improvements.
+
+Display actual measurements only.
+
+Show absolute differences and percentage changes where meaningful.
+
+If results are unavailable, show a pending benchmark state.
+
+---
+
+# PART 12 — POLICY AND SCENARIO PERSISTENCE
+
+Maintain the existing storage architecture.
+
+Persist:
+
+- Default robot profiles.
+- Custom robot profiles.
+- Selected robot.
+- Scenarios.
+- Experiment records.
+- Failure diagnoses.
+- Generated follow-up scenarios.
+- Policy parameters.
+- Training sessions.
+- Benchmark results.
+
+Ensure that refreshing the application does not silently lose data.
+
+Handle corrupted or missing storage data safely.
+
+Maintain compatibility with existing records.
+
+Do not silently delete previous experiments.
+
+Keep CSV export functional.
+
+---
+
+# PART 13 — OVERALL USER EXPERIENCE
+
+Maintain the five primary stages:
+
+1. Scenario Factory.
+2. Simulation Lab.
+3. Failure Analysis.
+4. Policy Training.
+5. Policy Comparison.
+
+Robot Configuration should be accessible before simulation and synchronized throughout the application.
+
+Advanced Analytics and Experiment History should remain available in an Advanced / More section.
+
+Every page should contain:
+- A clear title.
+- A short explanation.
+- One primary action.
+- A useful empty state.
+- Consistent layout.
+- Readable information.
+
+Avoid:
+- Excessive cards.
+- Repeated statistics.
+- Overloaded control panels.
+- Unnecessary technical terminology.
+- Decorative metrics without functional meaning.
+
+The application should look like a professional robotics research and experimentation platform.
+
+---
+
+# PART 14 — TECHNICAL VALIDATION
+
+Do not simply claim features work.
+
+Validate the underlying implementation.
+
+### Robot configuration tests
+
+- All three default robot profiles load.
+- Each robot has its own hardware configuration.
+- Selecting a robot updates the actual simulation.
+- Robot dimensions affect collision geometry.
+- Speed and acceleration affect movement.
+- Sensor configuration affects perception where modeled.
+- Custom robot profiles can be created and saved.
+- Invalid profiles are rejected.
+- Selected robot remains synchronized across pages.
+
+### Cross-robot tests
+
+- Run multiple robots on the same scenario.
+- Use the same seed and initial conditions.
+- Record separate results.
+- Verify results are not mixed.
+
+### Elevator tests
+
+- Ground to first floor.
+- First to second floor.
+- Second to ground.
+- Same-floor destination.
+- Outdoor destination.
+- Backup elevator.
+- All elevators unavailable.
+- Elevator stuck mid-shaft.
+
+Verify physical cabin movement and synchronized robot movement.
+
+### Failure management tests
+
+- Failed episodes appear in history.
+- Failures appear in Failure Analysis.
+- Generated scenarios appear in Scenario Factory.
+- Failed episodes do not automatically clutter the active scenario selector.
+- Duplicate scenarios are prevented.
+
+### Policy training tests
+
+- Actual observations are passed to the agent.
+- Actions affect the simulation.
+- Rewards are computed from outcomes.
+- Learned parameters are updated.
+- Learned parameters persist.
+- Candidate policy uses the learned parameters.
+- Robot-policy compatibility is enforced.
+
+### Benchmark tests
+
+- Baseline and candidate use the same robot for policy comparisons.
+- Different robots are compared under equivalent conditions for hardware comparisons.
+- Training scenarios do not leak into held-out tests.
+- Actual measurements are displayed.
+
+### Build validation
+
+- Run existing build commands.
+- Run TypeScript checks.
+- Fix compilation errors.
+- Fix broken imports.
+- Verify all pages load.
+- Verify state synchronization.
+- Verify persistence after refresh.
+- Check browser console errors.
+- Verify the application works from a fresh session.
+
+---
+
+# PART 15 — IMPLEMENTATION ORDER
+
+Work in the following order.
+
+**PHASE 1 — Robot Configuration Architecture**
+- Unified hardware configuration model.
+- Complete three default profiles.
+- Custom robot profile support.
+- Shared selected-robot state.
+
+**PHASE 2 — Actual Multi-Robot Simulation**
+- Hardware-dependent movement.
+- Collision dimensions.
+- Mobility constraints.
+- Sensor-aware perception.
+- Distinguishable 3D robot models.
+
+**PHASE 3 — Elevator Reliability**
+- Diagnose normal operation.
+- Fix physical cabin movement.
+- Fix destination-aware routing.
+- Validate all eight diagnostic scenarios.
+
+**PHASE 4 — Simulation Lab Redesign**
+- Simplify configuration.
+- Make 3D environment prominent.
+- Simplify live status.
+- Move advanced controls into expandable panels.
+
+**PHASE 5 — Scenario and Failure Management**
+- Separate experiments from scenarios.
+- Improve failure diagnosis.
+- Connect failure-driven generation.
+
+**PHASE 6 — Policy Learning**
+- Verify actual learning.
+- Support robot-specific training.
+- Improve training interface.
+
+**PHASE 7 — Benchmarking**
+- Policy comparison.
+- Cross-robot comparison.
+- Fair reproducible tests.
+
+**PHASE 8 — Final Integration**
+- Shared state.
+- Persistence.
+- Analytics.
+- UI consistency.
+- Build and end-to-end validation.
+
+Do not implement superficial UI features before verifying the underlying logic.
+
+If the entire task cannot be completed in one session, complete the phases in order, preserve all working changes and clearly report unfinished work.
+
+---
+
+# FINAL PRODUCT EXPECTATION
+
+The final RoboSim AI application should allow a user to:
+
+1. Generate a challenging synthetic scenario.
+2. Select a particular robot with a defined hardware configuration.
+3. Run that robot inside the 3D simulation.
+4. Observe its movement, perception and navigation.
+5. Record and analyze failures.
+6. Generate new scenarios based on those failures.
+7. Train or improve the robot's software decision-making policy.
+8. Compare baseline and candidate policies.
+9. Compare different robot hardware configurations.
+10. Measure actual performance and identify remaining weaknesses.
+
+The user should be able to understand the main workflow without requiring advanced robotics knowledge.
+
+The final project must demonstrate both:
+
+**Failure-Driven Robot Policy Improvement**
+
+AND
+
+**Multi-Robot Hardware Configuration Evaluation**
+
+The objective is a working, measurable, reproducible and demonstrable hackathon product.
+
+Do not prioritize impressive-looking dashboards over actual functionality.
+
+**BUILD A ROBOT EXPERIMENTATION PLATFORM WHERE DIFFERENT ROBOTS CAN BE TESTED, FAILURES CAN BE UNDERSTOOD, AND POLICIES CAN BE IMPROVED THROUGH MEASURABLE SIMULATION EXPERIMENTS.**

@@ -66,7 +66,11 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
   } = useExperimentStore();
 
   const [activeTab, setActiveTab] = useState<GeneratorTabMode>('Failure-Driven');
-  const [sourceFilter, setSourceFilter] = useState<'ALL' | ScenarioGenerationSource>('ALL');
+  const [sourceFilter, setSourceFilter] = useState<
+    'ALL' | 'Normal' | 'Training' | 'Testing' | 'Failure-Driven' | ScenarioGenerationSource
+  >('ALL');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [sortBy, setSortBy] = useState<'default' | 'diff-desc' | 'diff-asc' | 'name'>('default');
   const [createdBanner, setCreatedBanner] = useState<string | null>(null);
 
   // Random Generator state
@@ -118,9 +122,50 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
   const dynamicObstacles = commuterCount + randomCount + crossingCount + groupCount;
 
   const filteredScenarios = useMemo(() => {
-    if (sourceFilter === 'ALL') return scenarios;
-    return scenarios.filter((s) => (s.generationSource ?? 'Preset') === sourceFilter);
-  }, [scenarios, sourceFilter]);
+    const diffRank: Record<string, number> = {
+      Low: 1,
+      Moderate: 2,
+      High: 3,
+      Extreme: 4,
+    };
+    const q = searchQuery.trim().toLowerCase();
+    const list = scenarios.filter((s) => {
+      if (sourceFilter === 'Normal') {
+        if (s.isCustom || (s.elevatorFaultMode ?? 'none') !== 'none') return false;
+      } else if (sourceFilter === 'Training') {
+        if ((s.datasetSplit ?? 'train') !== 'train') return false;
+      } else if (sourceFilter === 'Testing') {
+        if (s.datasetSplit !== 'test') return false;
+      } else if (sourceFilter !== 'ALL') {
+        if ((s.generationSource ?? 'Preset') !== sourceFilter) return false;
+      }
+
+      if (q) {
+        const hay = `${s.name} ${s.category} ${s.description} ${s.targetedFailureCategory ?? ''} ${s.id}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    if (sortBy === 'diff-desc') {
+      return [...list].sort(
+        (a, b) =>
+          (diffRank[b.difficulty ?? 'Moderate'] ?? 2) -
+          (diffRank[a.difficulty ?? 'Moderate'] ?? 2)
+      );
+    }
+    if (sortBy === 'diff-asc') {
+      return [...list].sort(
+        (a, b) =>
+          (diffRank[a.difficulty ?? 'Moderate'] ?? 2) -
+          (diffRank[b.difficulty ?? 'Moderate'] ?? 2)
+      );
+    }
+    if (sortBy === 'name') {
+      return [...list].sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return list;
+  }, [scenarios, sourceFilter, searchQuery, sortBy]);
 
   const handleToggleZone = (zoneId: string) => {
     setSelectedZones((prev) =>
@@ -1059,31 +1104,70 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
 
         {/* Right 7 Cols: Scenario Catalog with Filter & Batch Checkboxes */}
         <div className="xl:col-span-7 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="font-display font-semibold text-base text-slate-100">
-                Synthetic Scenario Catalog ({filteredScenarios.length})
-              </h3>
-              <p className="text-xs text-slate-400">
-                Check scenarios to include in Headless Batch runs or launch any card in 3D Simulation Lab
-              </p>
+          <div className="space-y-3 bg-[#0d1322] border border-slate-800 rounded-xl p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="font-display font-semibold text-base text-slate-100">
+                  Scenario Library ({filteredScenarios.length} of {scenarios.length})
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Filter by Normal, Training, Testing, or Failure-Driven scenarios. Failed episodes never auto-populate this library unless explicitly synthesized.
+                </p>
+              </div>
+
+              {/* Filter Tabs */}
+              <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-lg text-xs">
+                {(
+                  [
+                    { id: 'ALL', label: 'All Scenarios' },
+                    { id: 'Normal', label: 'Normal' },
+                    { id: 'Training', label: 'Training' },
+                    { id: 'Testing', label: 'Testing' },
+                    { id: 'Failure-Driven', label: 'Failure-Driven' },
+                  ] as const
+                ).map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setSourceFilter(tab.id)}
+                    className={`px-2.5 py-1 rounded font-medium transition-colors cursor-pointer ${
+                      sourceFilter === tab.id
+                        ? 'bg-cyan-500 text-slate-950 font-semibold'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {/* Source Filter */}
-            <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-lg text-xs">
-              {(['ALL', 'Preset', 'Random', 'Failure-Driven', 'Custom'] as const).map((src) => (
-                <button
-                  key={src}
-                  onClick={() => setSourceFilter(src)}
-                  className={`px-2.5 py-1 rounded font-medium transition-colors cursor-pointer ${
-                    sourceFilter === src
-                      ? 'bg-cyan-500 text-slate-950 font-semibold'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
+            {/* Search & Sort Controls */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-slate-800/80 text-xs">
+              <div className="sm:col-span-2">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search scenarios by name, category, weakness, or ID..."
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+              <div>
+                <select
+                  value={sortBy}
+                  onChange={(e) =>
+                    setSortBy(
+                      e.target.value as 'default' | 'diff-desc' | 'diff-asc' | 'name'
+                    )
+                  }
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-100 focus:outline-none focus:border-cyan-500"
                 >
-                  {src}
-                </button>
-              ))}
+                  <option value="default">Sort: Default Order</option>
+                  <option value="diff-desc">Sort: Difficulty (Extreme → Low)</option>
+                  <option value="diff-asc">Sort: Difficulty (Low → Extreme)</option>
+                  <option value="name">Sort: Name (A → Z)</option>
+                </select>
+              </div>
             </div>
           </div>
 
@@ -1164,8 +1248,15 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
                     </p>
 
                     {scen.targetedFailureCategory && (
-                      <div className="p-2 rounded bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">
-                        <strong>Targets Weakness:</strong> {scen.targetedFailureCategory}
+                      <div className="p-2 rounded bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200 space-y-1">
+                        <div>
+                          <strong>Diagnosed Weakness:</strong> {scen.targetedFailureCategory}
+                        </div>
+                        {scen.sourceExperimentIds && scen.sourceExperimentIds.length > 0 && (
+                          <div className="font-mono text-[10px] text-amber-300/90">
+                            Derived from Failed Run(s): {scen.sourceExperimentIds.join(', ')}
+                          </div>
+                        )}
                       </div>
                     )}
 
