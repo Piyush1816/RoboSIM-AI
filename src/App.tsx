@@ -1,10 +1,12 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Sidebar } from './components/layout/Sidebar';
 import { TopNavBar } from './components/layout/TopNavBar';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import {
   DELIVERY_LOCATIONS,
   formatRobotHardwareSummary,
 } from './data/campusConfig';
+import { EnvironmentStudioPage } from './pages/EnvironmentStudioPage';
 import { ExperimentHistoryPage } from './pages/ExperimentHistoryPage';
 import { FailureAnalysisPage } from './pages/FailureAnalysisPage';
 import { OverviewPage } from './pages/OverviewPage';
@@ -14,6 +16,7 @@ import { RobotConfigPage } from './pages/RobotConfigPage';
 import { RobotPoliciesPage } from './pages/RobotPoliciesPage';
 import { ScenarioGeneratorPage } from './pages/ScenarioGeneratorPage';
 import { SimulationLabPage } from './pages/SimulationLabPage';
+import { WelcomeAuthPage } from './pages/WelcomeAuthPage';
 import {
   ExperimentStoreProvider,
   useExperimentStore,
@@ -28,6 +31,7 @@ import {
 } from './types/simulation';
 
 function RoboSimWorkspace() {
+  const { user, isAuthReady, isGuestWorkspace, showWelcomePage } = useAuth();
   const [activePage, setActivePage] = useState<NavPageId>('overview');
 
   // Single Source of Truth from Centralized Experiment Store
@@ -42,6 +46,8 @@ function RoboSimWorkspace() {
     selectedRobotId,
     activeRobot,
     setSelectedRobotId,
+    environments,
+    activeEnvironment,
     demoPreviewEnabled,
     setDemoPreviewEnabled,
     recordExperiment,
@@ -65,6 +71,8 @@ function RoboSimWorkspace() {
     robotId: activeRobot.id,
     robotName: activeRobot.name,
     robotStatus: 'Standby',
+    environmentId: activeEnvironment.id,
+    environmentName: activeEnvironment.name,
     originName: 'Robotics Lab North Dock',
     currentDestination: 'Hostel A Courtyard Locker (HST-N1)',
     batteryLevelPct: 98.0,
@@ -99,17 +107,27 @@ function RoboSimWorkspace() {
 
   const handleSimulationComplete = useCallback(
     (payload: SimulationCompletionPayload) => {
+      const envLocs =
+        activeEnvironment.locations.length >= 2
+          ? activeEnvironment.locations
+          : DELIVERY_LOCATIONS;
+
       const originLoc =
-        DELIVERY_LOCATIONS.find((l) => l.id === activeScenario.originId) ??
+        envLocs.find((l) => l.id === activeScenario.originId) ??
+        envLocs[0] ??
         DELIVERY_LOCATIONS[1];
       const destLoc =
-        DELIVERY_LOCATIONS.find((l) => l.id === activeScenario.destinationId) ??
+        envLocs.find((l) => l.id === activeScenario.destinationId) ??
+        envLocs[Math.min(1, envLocs.length - 1)] ??
         DELIVERY_LOCATIONS[5];
 
       const nowStr = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
       recordExperiment({
         timestamp: nowStr,
+        environmentId: activeEnvironment.id,
+        environmentName: activeEnvironment.name,
+        environmentVersion: activeEnvironment.version,
         scenarioId: payload.scenarioId || activeScenario.id,
         scenarioName: payload.scenarioName || activeScenario.name,
         scenarioGenerationSource: activeScenario.generationSource ?? 'Preset',
@@ -118,6 +136,7 @@ function RoboSimWorkspace() {
         robotName: payload.robotName || activeRobot.name,
         robotHardwareSummary:
           payload.robotHardwareSummary ?? formatRobotHardwareSummary(activeRobot),
+        robotConfigSnapshot: { ...activeRobot },
         payloadKg: payload.payloadKg,
         policyId: payload.policyId || activePolicy.id,
         policyName: payload.policyName || activePolicy.name,
@@ -183,12 +202,15 @@ function RoboSimWorkspace() {
       });
     },
     [
+      activeEnvironment.id,
+      activeEnvironment.locations,
+      activeEnvironment.name,
+      activeEnvironment.version,
       activePolicy.id,
       activePolicy.isCandidatePolicy,
       activePolicy.name,
       activePolicy.version,
-      activeRobot.id,
-      activeRobot.name,
+      activeRobot,
       activeScenario.destinationId,
       activeScenario.generationSource,
       activeScenario.id,
@@ -219,6 +241,10 @@ function RoboSimWorkspace() {
     [updatePolicies]
   );
 
+  if (isAuthReady && ((!user && !isGuestWorkspace) || showWelcomePage)) {
+    return <WelcomeAuthPage />;
+  }
+
   return (
     <div className="h-screen w-screen overflow-hidden flex bg-[#070b14] text-slate-100">
       {/* Persistent Left Sidebar */}
@@ -230,6 +256,7 @@ function RoboSimWorkspace() {
         isPolicyTrained={candidatePolicyState.isTrained}
         benchmarksCount={benchmarkHistory.length + crossRobotBenchmarks.length}
         robotsCount={robots.length}
+        environmentsCount={environments.length}
       />
 
       {/* Right Main Workspace */}
@@ -239,6 +266,7 @@ function RoboSimWorkspace() {
           simulationState={telemetry.simulationState}
           activeRobotName={activeRobot.name}
           activeScenarioName={activeScenario.name}
+          activeEnvironmentName={activeEnvironment.name}
           onQuickOpenSimLab={() => setActivePage('simulation-lab')}
         />
 
@@ -275,6 +303,10 @@ function RoboSimWorkspace() {
               onLogEvent={handleLogEvent}
               onSimulationComplete={handleSimulationComplete}
             />
+          )}
+
+          {activePage === 'environment-studio' && (
+            <EnvironmentStudioPage onNavigate={setActivePage} />
           )}
 
           {activePage === 'robot-config' && (
@@ -348,8 +380,10 @@ function RoboSimWorkspace() {
 
 export default function App() {
   return (
-    <ExperimentStoreProvider>
-      <RoboSimWorkspace />
-    </ExperimentStoreProvider>
+    <AuthProvider>
+      <ExperimentStoreProvider>
+        <RoboSimWorkspace />
+      </ExperimentStoreProvider>
+    </AuthProvider>
   );
 }

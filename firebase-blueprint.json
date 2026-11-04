@@ -1,0 +1,58 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and workspace metadata for RoboSim AI.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "format": "email", "description": "User email address" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "createdAt": { "type": "string", "description": "ISO timestamp when profile was created" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp when profile was last updated" },
+        "selectedRobotId": { "type": "string", "description": "Active robot ID in workspace" },
+        "selectedEnvironmentId": { "type": "string", "description": "Active environment ID in workspace" },
+        "demoPreviewEnabled": { "type": "boolean", "description": "Whether demo preview records are enabled" }
+      },
+      "required": ["uid", "updatedAt"]
+    },
+    "UserWorkspaceChunk": {
+      "title": "UserWorkspaceChunk",
+      "description": "Per-user workspace collection chunk storing robots, environments, scenarios, policies, experiments, failures, and benchmarks.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Owner Firebase Auth UID" },
+        "category": {
+          "type": "string",
+          "enum": [
+            "robots",
+            "environments",
+            "scenarios",
+            "policies",
+            "candidatePolicy",
+            "experiments",
+            "failures",
+            "benchmarks",
+            "robotBenchmarks",
+            "fdBatches",
+            "preferences"
+          ],
+          "description": "Workspace data category"
+        },
+        "payloadJson": { "type": "string", "description": "Serialized JSON payload for the category" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp of last update" }
+      },
+      "required": ["uid", "category", "payloadJson", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profile document isolated by userId"
+    },
+    "/users/{userId}/workspace/{categoryId}": {
+      "schema": { "$ref": "#/entities/UserWorkspaceChunk" },
+      "description": "Per-user workspace category documents (robots, environments, scenarios, policies, experiments, failures, benchmarks, preferences)"
+    }
+  }
+}

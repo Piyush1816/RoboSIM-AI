@@ -5,6 +5,7 @@ import {
 import {
   DatasetSplit,
   ElevatorFaultMode,
+  EnvironmentDefinition,
   ExperimentRecord,
   FailureCategory,
   FailureDrivenGenerationBatch,
@@ -143,6 +144,7 @@ export interface RandomScenarioGeneratorOptions {
   includeElevatorFaults?: boolean;
   includeBatteryConstraints?: boolean;
   datasetSplitMode?: 'balanced' | DatasetSplit;
+  environment?: EnvironmentDefinition;
 }
 
 /**
@@ -160,10 +162,15 @@ export function generateRandomSyntheticScenarios(
     includeElevatorFaults = true,
     includeBatteryConstraints = true,
     datasetSplitMode = 'balanced',
+    environment,
   } = options;
 
   const generated: ScenarioConfig[] = [];
-  const deliveryLocs = DELIVERY_LOCATIONS.filter((l) => l.type === 'delivery');
+  const envLocs =
+    environment?.locations && environment.locations.length >= 2
+      ? environment.locations
+      : DELIVERY_LOCATIONS.filter((l) => l.type === 'delivery');
+  const deliveryLocs = envLocs.length >= 2 ? envLocs : DELIVERY_LOCATIONS;
 
   const safeZoneCombos: string[][] = [
     [],
@@ -331,6 +338,8 @@ export function generateRandomSyntheticScenarios(
       ).toFixed(0)}% sensor noise.`,
       originId: origin.id,
       destinationId: dest.id,
+      originFloor: origin.floor ?? 0,
+      destinationFloor: dest.floor ?? 0,
       activeConstructionZones: chosenZones,
       dynamicObstacleCount: totalPeds,
       pedestrianDistribution: {
@@ -358,6 +367,9 @@ export function generateRandomSyntheticScenarios(
       generationReason: `Random synthetic sampling (Seed ${scenarioSeed}) for ${split.toUpperCase()} split evaluation.`,
       recommendedPolicyId: 'pol-candidate-rl',
       isCustom: true,
+      environmentId: environment?.id ?? 'env-campus-standard',
+      environmentName: environment?.name ?? 'University Campus Testbed',
+      environmentVersion: environment?.version ?? '1.0',
     };
 
     generated.push(scenario);
@@ -375,7 +387,8 @@ export function generateFailureDrivenScenarios(
   experiments: ExperimentRecord[],
   existingScenarios: ScenarioConfig[],
   countPerWeakness = 2,
-  baseSeed = 8080
+  baseSeed = 8080,
+  environment?: EnvironmentDefinition
 ): FailureDrivenGenerationBatch {
   let weaknesses: FailureWeaknessCluster[] = analyzeWeaknessesFromExperiments(
     experiments,
@@ -416,7 +429,11 @@ export function generateFailureDrivenScenarios(
   }
 
   const generatedScenarios: ScenarioConfig[] = [];
-  const deliveryLocs = DELIVERY_LOCATIONS.filter((l) => l.type === 'delivery');
+  const envLocs =
+    environment?.locations && environment.locations.length >= 2
+      ? environment.locations
+      : DELIVERY_LOCATIONS.filter((l) => l.type === 'delivery');
+  const deliveryLocs = envLocs.length >= 2 ? envLocs : DELIVERY_LOCATIONS;
   const difficultyProgression: ScenarioDifficulty[] = [
     'Moderate',
     'High',
@@ -436,8 +453,10 @@ export function generateFailureDrivenScenarios(
 
       let origin = deliveryLocs[Math.floor(rng() * deliveryLocs.length)];
       let dest = deliveryLocs[Math.floor(rng() * deliveryLocs.length)];
-      while (dest.id === origin.id) {
+      let guard = 0;
+      while (dest.id === origin.id && guard < 15) {
         dest = deliveryLocs[Math.floor(rng() * deliveryLocs.length)];
+        guard++;
       }
 
       let category: ScenarioConfig['category'] = 'High Congestion';
@@ -528,9 +547,12 @@ export function generateFailureDrivenScenarios(
 
         case 'Elevator-related failure':
           category = 'Elevator Recovery';
-          origin = DELIVERY_LOCATIONS.find((l) => l.id === 'loc-eng-dock') ?? origin;
+          origin =
+            deliveryLocs.find((l) => l.id === 'loc-eng-dock') ?? deliveryLocs[0];
           dest =
-            DELIVERY_LOCATIONS.find((l) => l.id === 'loc-library-2f-vault') ?? dest;
+            deliveryLocs.find(
+              (l) => l.id === 'loc-library-2f-vault' || (l.floor ?? 0) > 0
+            ) ?? deliveryLocs[deliveryLocs.length - 1];
           activeZones = [];
           requiresElevator = true;
           elevatorFaultMode =
@@ -617,6 +639,9 @@ export function generateFailureDrivenScenarios(
         sourceExperimentIds: sourceExpIds,
         recommendedPolicyId: 'pol-candidate-rl',
         isCustom: true,
+        environmentId: environment?.id ?? 'env-campus-standard',
+        environmentName: environment?.name ?? 'University Campus Testbed',
+        environmentVersion: environment?.version ?? '1.0',
       });
     }
   }

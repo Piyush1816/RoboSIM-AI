@@ -11,6 +11,7 @@ import {
   clearStoredExperiments,
   computeOverviewMetrics,
   computePolicyAnalytics,
+  deleteCustomEnvironment,
   deleteCustomRobot,
   deriveFailureDiagnosesFromExperiments,
   deriveFailureRecordsFromExperiments,
@@ -19,10 +20,12 @@ import {
   loadCandidatePolicyState,
   loadCrossRobotBenchmarkHistory,
   loadDemoPreviewPreference,
+  loadEnvironments,
   loadFailureDrivenBatches,
   loadPolicies,
   loadRobots,
   loadScenarios,
+  loadSelectedEnvironmentId,
   loadSelectedRobotId,
   loadStoredExperiments,
   OverviewMetricsSummary,
@@ -31,12 +34,14 @@ import {
   saveBenchmarkResult,
   saveCandidatePolicyState,
   saveCrossRobotBenchmarkResult,
+  saveCustomEnvironment,
   saveCustomRobot,
   saveCustomScenario,
   saveCustomScenariosBatch,
   saveDemoPreviewPreference,
   saveFailureDrivenBatch,
   savePolicies,
+  saveSelectedEnvironmentId,
   saveSelectedRobotId,
   saveStoredExperiment,
   saveStoredExperimentsBatch,
@@ -46,6 +51,7 @@ import {
   BenchmarkSuiteResult,
   CandidatePolicyState,
   CrossRobotBenchmarkResult,
+  EnvironmentDefinition,
   ExperimentRecord,
   FailureDiagnosisRecord,
   FailureDrivenGenerationBatch,
@@ -66,6 +72,12 @@ interface ExperimentStoreContextValue {
   policyAnalytics: PolicyAnalyticsSummary[];
   scenarios: ScenarioConfig[];
   policies: NavigationPolicyConfig[];
+  environments: EnvironmentDefinition[];
+  selectedEnvironmentId: string;
+  activeEnvironment: EnvironmentDefinition;
+  setSelectedEnvironmentId: (envId: string) => void;
+  saveEnvironmentProfile: (env: EnvironmentDefinition) => EnvironmentDefinition[];
+  deleteEnvironmentProfile: (envId: string) => EnvironmentDefinition[];
   robots: RobotUnitConfig[];
   selectedRobotId: string;
   activeRobot: RobotUnitConfig;
@@ -107,6 +119,11 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
   const [policies, setPolicies] = useState<NavigationPolicyConfig[]>(() =>
     loadPolicies()
   );
+  const [environments, setEnvironments] = useState<EnvironmentDefinition[]>(() =>
+    loadEnvironments()
+  );
+  const [selectedEnvironmentIdState, setSelectedEnvironmentIdState] =
+    useState<string>(() => loadSelectedEnvironmentId());
   const [robots, setRobots] = useState<RobotUnitConfig[]>(() => loadRobots());
   const [selectedRobotIdState, setSelectedRobotIdState] = useState<string>(() =>
     loadSelectedRobotId()
@@ -131,6 +148,8 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
     setStoredExperiments(loadStoredExperiments());
     setScenarios(loadScenarios());
     setPolicies(loadPolicies());
+    setEnvironments(loadEnvironments());
+    setSelectedEnvironmentIdState(loadSelectedEnvironmentId());
     setRobots(loadRobots());
     setSelectedRobotIdState(loadSelectedRobotId());
     setCandidatePolicyState(loadCandidatePolicyState());
@@ -263,6 +282,37 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
     []
   );
 
+  const setSelectedEnvironmentId = useCallback((envId: string) => {
+    setSelectedEnvironmentIdState(envId);
+    saveSelectedEnvironmentId(envId);
+  }, []);
+
+  const saveEnvironmentProfile = useCallback(
+    (env: EnvironmentDefinition): EnvironmentDefinition[] => {
+      const updated = saveCustomEnvironment(env);
+      setEnvironments(updated);
+      return updated;
+    },
+    []
+  );
+
+  const deleteEnvironmentProfile = useCallback(
+    (envId: string): EnvironmentDefinition[] => {
+      const updated = deleteCustomEnvironment(envId);
+      setEnvironments(updated);
+      setSelectedEnvironmentIdState(loadSelectedEnvironmentId());
+      return updated;
+    },
+    []
+  );
+
+  const activeEnvironment = useMemo(
+    () =>
+      environments.find((e) => e.id === selectedEnvironmentIdState) ??
+      environments[0],
+    [environments, selectedEnvironmentIdState]
+  );
+
   const setSelectedRobotId = useCallback((robotId: string) => {
     setSelectedRobotIdState(robotId);
     saveSelectedRobotId(robotId);
@@ -343,6 +393,12 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
       policyAnalytics,
       scenarios,
       policies,
+      environments,
+      selectedEnvironmentId: selectedEnvironmentIdState,
+      activeEnvironment,
+      setSelectedEnvironmentId,
+      saveEnvironmentProfile,
+      deleteEnvironmentProfile,
       robots,
       selectedRobotId: selectedRobotIdState,
       activeRobot,
@@ -377,6 +433,12 @@ export const ExperimentStoreProvider: React.FC<{ children: React.ReactNode }> = 
       policyAnalytics,
       scenarios,
       policies,
+      environments,
+      selectedEnvironmentIdState,
+      activeEnvironment,
+      setSelectedEnvironmentId,
+      saveEnvironmentProfile,
+      deleteEnvironmentProfile,
       robots,
       selectedRobotIdState,
       activeRobot,

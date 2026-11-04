@@ -11,6 +11,7 @@ import {
   CandidatePolicyState,
   CrossRobotBenchmarkResult,
   CrossRobotComparisonEntry,
+  EnvironmentDefinition,
   ExperimentRecord,
   ExperimentRunType,
   NavigationPolicyConfig,
@@ -29,6 +30,7 @@ export interface SingleHeadlessRunOptions {
   policy: NavigationPolicyConfig;
   robotId?: string;
   robotConfigOverride?: RobotUnitConfig;
+  environment?: EnvironmentDefinition;
   payloadKgOverride?: number;
   seedOverride?: number;
   runType?: ExperimentRunType;
@@ -58,6 +60,7 @@ export function runSingleHeadlessEpisode(
     policy,
     robotId = 'bot-rover-01',
     robotConfigOverride,
+    environment,
     payloadKgOverride,
     seedOverride,
     runType = 'Batch',
@@ -106,7 +109,8 @@ export function runSingleHeadlessEpisode(
       onComplete: (payload) => {
         capturedCompletion = payload;
       },
-    }
+    },
+    environment
   );
 
   if (robotConfigOverride) {
@@ -148,13 +152,15 @@ export function runSingleHeadlessEpisode(
     controller.step(subDt);
   }
 
+  const currentBot = controller.getCurrentRobot();
+
   const finalCompletion: SimulationCompletionData = capturedCompletion ?? {
     runSessionId: `HEADLESS-${Date.now()}`,
     scenarioId: seededScenario.id,
     scenarioName: seededScenario.name,
     scenarioSeed: effectiveSeed,
-    robotId: controller.getCurrentRobot().id,
-    robotName: controller.getCurrentRobot().name,
+    robotId: currentBot.id,
+    robotName: currentBot.name,
     policyId: policy.id,
     policyName: policy.name,
     policyVersion: policy.version,
@@ -213,15 +219,26 @@ export function runSingleHeadlessEpisode(
     scenarioSeed: effectiveSeed,
     scenarioGenerationSource: seededScenario.generationSource ?? 'Preset',
     scenarioDifficulty: seededScenario.difficulty ?? 'Moderate',
+    environmentId:
+      environment?.id ??
+      seededScenario.environmentId ??
+      'env-campus-standard',
+    environmentName:
+      environment?.name ??
+      seededScenario.environmentName ??
+      'University Campus Testbed',
+    environmentVersion:
+      environment?.version ?? seededScenario.environmentVersion ?? '1.0',
     robotId: finalCompletion.robotId,
     robotName: finalCompletion.robotName,
     robotHardwareSummary:
       finalCompletion.robotHardwareSummary ??
-      formatRobotHardwareSummary(controller.getCurrentRobot()),
+      formatRobotHardwareSummary(currentBot),
+    robotConfigSnapshot: { ...currentBot },
     payloadKg:
       finalCompletion.payloadKg ??
       payloadKgOverride ??
-      controller.getCurrentRobot().defaultPayloadKg,
+      currentBot.defaultPayloadKg,
     policyId: finalCompletion.policyId,
     policyName: finalCompletion.policyName,
     policyVersion: finalCompletion.policyVersion ?? policy.version,
@@ -294,6 +311,7 @@ export interface BatchExperimentRunnerOptions {
   scenarios: ScenarioConfig[];
   policy: NavigationPolicyConfig;
   robotId?: string;
+  environment?: EnvironmentDefinition;
   episodesPerScenario: number;
   candidatePolicyState?: CandidatePolicyState | null;
   onEpisodeFinished?: (
@@ -315,6 +333,7 @@ export async function runHeadlessBatchExperiments(
     scenarios,
     policy,
     robotId = 'bot-rover-01',
+    environment,
     episodesPerScenario,
     candidatePolicyState = null,
     onEpisodeFinished,
@@ -343,6 +362,7 @@ export async function runHeadlessBatchExperiments(
         scenario: scen,
         policy,
         robotId,
+        environment,
         seedOverride: epSeed,
         runType: 'Batch',
         candidatePolicyState: policy.isCandidatePolicy
@@ -369,6 +389,7 @@ export interface PolicyTrainingRunOptions {
   candidatePolicyState: CandidatePolicyState;
   episodesCount: number;
   robotId?: string;
+  environment?: EnvironmentDefinition;
   onEpisodeTrained?: (
     episodeRecord: TrainingEpisodeRecord,
     experimentRecord: ExperimentRecord,
@@ -396,6 +417,7 @@ export async function executePolicyTrainingLoop(
     candidatePolicyState,
     episodesCount,
     robotId = 'bot-rover-01',
+    environment,
     onEpisodeTrained,
     shouldPauseOrCancel,
   } = options;
@@ -405,10 +427,22 @@ export async function executePolicyTrainingLoop(
       ? trainingScenarios
       : [];
 
+  const allRobots = loadRobots();
+  const trainingRobot =
+    allRobots.find((r) => r.id === robotId) ??
+    ROBOT_UNITS.find((r) => r.id === robotId) ??
+    ROBOT_UNITS[0];
+
   // Deep clone mutable state so React state updates cleanly
   const workingState: CandidatePolicyState = JSON.parse(
     JSON.stringify(candidatePolicyState)
   );
+  workingState.trainedRobotId = trainingRobot.id;
+  workingState.trainedRobotName = trainingRobot.name;
+  workingState.trainedEnvironmentId =
+    environment?.id ?? 'env-campus-standard';
+  workingState.trainedEnvironmentName =
+    environment?.name ?? 'University Campus Testbed';
 
   const candidatePolicyConfig: NavigationPolicyConfig =
     NAVIGATION_POLICIES.find((p) => p.id === 'pol-candidate-rl') ?? {
@@ -463,6 +497,7 @@ export async function executePolicyTrainingLoop(
           version: workingState.version,
         },
         robotId,
+        environment,
         seedOverride: episodeSeed,
         runType: 'Training',
         candidatePolicyState: workingState,
@@ -597,6 +632,7 @@ export async function runFairPolicyBenchmarkSuite(options: {
   candidatePolicyState: CandidatePolicyState;
   episodesPerScenario?: number;
   robotId?: string;
+  environment?: EnvironmentDefinition;
   onProgress?: (completed: number, total: number, label: string) => void;
 }): Promise<{
   benchmarkResult: BenchmarkSuiteResult;
@@ -608,6 +644,7 @@ export async function runFairPolicyBenchmarkSuite(options: {
     candidatePolicyState,
     episodesPerScenario = 1,
     robotId = 'bot-rover-01',
+    environment,
     onProgress,
   } = options;
 
@@ -652,6 +689,7 @@ export async function runFairPolicyBenchmarkSuite(options: {
         scenario: scen,
         policy: baselinePolicy,
         robotId,
+        environment,
         seedOverride: seed,
         runType: 'Benchmark',
         candidatePolicyState: null,
@@ -673,6 +711,7 @@ export async function runFairPolicyBenchmarkSuite(options: {
         scenario: scen,
         policy: candidatePolicyConfig,
         robotId,
+        environment,
         seedOverride: seed,
         runType: 'Benchmark',
         candidatePolicyState,
@@ -850,7 +889,9 @@ export async function runFairPolicyBenchmarkSuite(options: {
 
   const overallSummary = `Evaluated across ${
     evaluationScenarios.length
-  } held-out test scenarios (${
+  } held-out test scenarios in ${
+    environment?.name ?? 'University Campus Testbed'
+  } (${
     baselineRecords.length
   } episodes per policy with identical seeds). Candidate Policy (${
     candidatePolicyState.version
@@ -883,6 +924,9 @@ export async function runFairPolicyBenchmarkSuite(options: {
   const benchmarkResult: BenchmarkSuiteResult = {
     id: `BENCH-${Date.now().toString().slice(-6)}`,
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    environmentId: environment?.id ?? 'env-campus-standard',
+    environmentName: environment?.name ?? 'University Campus Testbed',
+    environmentVersion: environment?.version ?? '1.0',
     robotId: benchRobot.id,
     robotName: benchRobot.name,
     candidatePolicyVersion: candidatePolicyState.version,
@@ -913,6 +957,7 @@ export async function runCrossRobotHardwareBenchmarkSuite(options: {
   robots: RobotUnitConfig[];
   scenarios: ScenarioConfig[];
   policy: NavigationPolicyConfig;
+  environment?: EnvironmentDefinition;
   candidatePolicyState?: CandidatePolicyState | null;
   requestedPayloadKg?: number;
   episodesPerScenario?: number;
@@ -925,6 +970,7 @@ export async function runCrossRobotHardwareBenchmarkSuite(options: {
     robots,
     scenarios,
     policy,
+    environment,
     candidatePolicyState = null,
     requestedPayloadKg = 15,
     episodesPerScenario = 1,
@@ -956,6 +1002,7 @@ export async function runCrossRobotHardwareBenchmarkSuite(options: {
           policy,
           robotId: robot.id,
           robotConfigOverride: robot,
+          environment,
           payloadKgOverride: requestedPayloadKg,
           seedOverride: seed,
           runType: 'Benchmark',
@@ -1085,7 +1132,9 @@ export async function runCrossRobotHardwareBenchmarkSuite(options: {
 
   const best = sortedEntries[0] ?? entries[0];
   const recommendationRationale = best
-    ? `${best.robotName} achieved the strongest overall performance for a ${requestedPayloadKg} kg payload under ${policy.name}: ${
+    ? `${best.robotName} achieved the strongest overall performance in ${
+        environment?.name ?? 'University Campus Testbed'
+      } for a ${requestedPayloadKg} kg payload under ${policy.name}: ${
         best.successRatePct
       }% success rate, ${best.totalCollisions} collisions, ${
         best.avgCompletionTimeSec
@@ -1101,6 +1150,9 @@ export async function runCrossRobotHardwareBenchmarkSuite(options: {
   const benchmarkResult: CrossRobotBenchmarkResult = {
     id: `RBOT-BENCH-${Date.now().toString().slice(-6)}`,
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    environmentId: environment?.id ?? 'env-campus-standard',
+    environmentName: environment?.name ?? 'University Campus Testbed',
+    environmentVersion: environment?.version ?? '1.0',
     scenarioIds: evalScenarios.map((s) => s.id),
     scenarioNames: evalScenarios.map((s) => s.name),
     policyId: policy.id,

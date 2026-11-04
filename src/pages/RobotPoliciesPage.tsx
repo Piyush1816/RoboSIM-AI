@@ -48,6 +48,10 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
     selectedRobotId,
     activeRobot,
     setSelectedRobotId,
+    environments,
+    selectedEnvironmentId,
+    activeEnvironment,
+    setSelectedEnvironmentId,
     candidatePolicyState,
     updateCandidatePolicyState,
     resetCandidatePolicy,
@@ -188,6 +192,7 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
       candidatePolicyState,
       episodesCount: episodesToTrain,
       robotId: selectedRobotId,
+      environment: activeEnvironment,
       onEpisodeTrained: (_epRec, expRec, latestPol, completed, total) => {
         bufferedExperiments.push(expRec);
         updateCandidatePolicyState(latestPol);
@@ -204,7 +209,7 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
     setTrainingStatus('idle');
     onSelectPolicy('pol-candidate-rl');
     setSavedNotice(
-      `Training completed on ${activeRobot.name}: Candidate Policy updated to v${updatedPolicyState.version} across ${bufferedExperiments.length} simulated episodes and activated.`
+      `Training completed on ${activeRobot.name} in ${activeEnvironment.name}: Candidate Policy updated to v${updatedPolicyState.version} across ${bufferedExperiments.length} simulated episodes and activated.`
     );
   };
 
@@ -518,30 +523,57 @@ export const RobotPoliciesPage: React.FC<RobotPoliciesPageProps> = ({
             </div>
           </div>
 
-          {/* Target Robot Hardware Profile for Policy Training */}
-          <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-3 space-y-2 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="text-slate-400 font-medium">
-                Target Robot Hardware Profile:
-              </span>
-              {candidatePolicyState.trainedRobotName && (
-                <span className="text-[11px] font-mono text-cyan-300">
-                  Trained on: {candidatePolicyState.trainedRobotName}
+          {/* Target Environment & Robot Hardware Profile for Policy Training */}
+          <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-3 space-y-2.5 text-xs">
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-medium">
+                  Target Environment:
                 </span>
-              )}
+                {candidatePolicyState.trainedEnvironmentName && (
+                  <span className="text-[11px] font-mono text-emerald-300">
+                    Env: {candidatePolicyState.trainedEnvironmentName}
+                  </span>
+                )}
+              </div>
+              <select
+                value={selectedEnvironmentId}
+                onChange={(e) => setSelectedEnvironmentId(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100"
+              >
+                {environments.map((env) => (
+                  <option key={env.id} value={env.id}>
+                    {env.name} ({env.templateType} · {env.floors.length}F)
+                  </option>
+                ))}
+              </select>
             </div>
-            <select
-              value={selectedRobotId}
-              onChange={(e) => setSelectedRobotId(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100"
-            >
-              {robots.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name} ({r.maxSpeedMps} m/s · {r.payloadCapacityKg} kg ·{' '}
-                  {r.lidarRangeM ?? 28}m LiDAR)
-                </option>
-              ))}
-            </select>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-medium">
+                  Target Robot Hardware Profile:
+                </span>
+                {candidatePolicyState.trainedRobotName && (
+                  <span className="text-[11px] font-mono text-cyan-300">
+                    Trained on: {candidatePolicyState.trainedRobotName}
+                  </span>
+                )}
+              </div>
+              <select
+                value={selectedRobotId}
+                onChange={(e) => setSelectedRobotId(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100"
+              >
+                {robots.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name} ({r.maxSpeedMps} m/s · {r.payloadCapacityKg} kg ·{' '}
+                    {r.lidarRangeM ?? 28}m LiDAR)
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {candidatePolicyState.isTrained &&
               candidatePolicyState.trainedRobotId &&
               candidatePolicyState.trainedRobotId !== selectedRobotId && (

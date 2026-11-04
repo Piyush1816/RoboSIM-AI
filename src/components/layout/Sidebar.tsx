@@ -11,6 +11,7 @@ import {
   GitCompare,
   History,
   LayoutDashboard,
+  Map,
   Sliders,
 } from 'lucide-react';
 import { NavPageId } from '../../types/simulation';
@@ -23,6 +24,7 @@ interface SidebarProps {
   isPolicyTrained?: boolean;
   benchmarksCount?: number;
   robotsCount?: number;
+  environmentsCount?: number;
 }
 
 const PRIMARY_WORKFLOW_STAGES: {
@@ -35,15 +37,24 @@ const PRIMARY_WORKFLOW_STAGES: {
   { id: 'simulation-lab', stageNum: 2, label: 'Simulation Lab', icon: Box },
   { id: 'failure-analysis', stageNum: 3, label: 'Failure Analysis', icon: AlertTriangle },
   { id: 'robot-policies', stageNum: 4, label: 'Policy Training', icon: Bot },
-  { id: 'policy-benchmarking', stageNum: 5, label: 'Policy & Robot Bench', icon: GitCompare },
+  { id: 'policy-benchmarking', stageNum: 5, label: 'Policy Comparison', icon: GitCompare },
 ];
 
-const SECONDARY_ITEMS: {
+const SUPPORTING_ITEMS: {
   id: NavPageId;
   label: string;
   icon: React.FC<{ className?: string }>;
 }[] = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'environment-studio', label: 'Environment Studio', icon: Map },
   { id: 'robot-config', label: 'Robot Configuration', icon: Cpu },
+];
+
+const ADVANCED_ITEMS: {
+  id: NavPageId;
+  label: string;
+  icon: React.FC<{ className?: string }>;
+}[] = [
   { id: 'performance-analytics', label: 'Performance Analytics', icon: BarChart3 },
   { id: 'experiment-history', label: 'Experiment History', icon: History },
 ];
@@ -55,15 +66,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   failedCount,
   isPolicyTrained = false,
   benchmarksCount = 0,
-  robotsCount = 3,
+  robotsCount = 4,
+  environmentsCount = 8,
 }) => {
-  const isSecondaryActive =
-    activePage === 'robot-config' ||
+  const isAdvancedActive =
     activePage === 'performance-analytics' ||
     activePage === 'experiment-history';
   const [showAdvanced, setShowAdvanced] = useState<boolean>(true);
 
-  const expandedAdvanced = showAdvanced || isSecondaryActive;
+  const expandedAdvanced = showAdvanced || isAdvancedActive;
 
   return (
     <aside className="w-56 xl:w-64 shrink-0 h-full overflow-y-auto bg-[#0a0f1d] border-r border-slate-800/80 flex flex-col justify-between select-none">
@@ -90,31 +101,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* Navigation Links */}
         <div className="p-3 space-y-4">
-          {/* Overview Entry */}
-          <div>
-            <button
-              onClick={() => onSelectPage('overview')}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs xl:text-sm font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                activePage === 'overview'
-                  ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
-                  : 'text-slate-300 hover:text-slate-100 hover:bg-slate-800/50 border border-transparent'
-              }`}
-            >
-              <span className="flex items-center gap-2.5 truncate">
-                <LayoutDashboard
-                  className={`w-4 h-4 shrink-0 ${
-                    activePage === 'overview' ? 'text-cyan-400' : 'text-slate-400'
-                  }`}
-                />
-                <span className="truncate">Overview</span>
-              </span>
-            </button>
-          </div>
-
           {/* 5 Primary Workflow Stages */}
           <div className="space-y-1">
             <div className="px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-              5-Stage Pipeline
+              Primary Workflow
             </div>
             <nav className="space-y-1" aria-label="5-Stage Closed-Loop Workflow">
               {PRIMARY_WORKFLOW_STAGES.map((item) => {
@@ -169,13 +159,57 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </nav>
           </div>
 
-          {/* Secondary / Advanced Section */}
+          {/* Supporting Pages */}
+          <div className="space-y-1 pt-2 border-t border-slate-800/70">
+            <div className="px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+              Supporting Pages
+            </div>
+            <nav className="space-y-1" aria-label="Supporting Pages">
+              {SUPPORTING_ITEMS.map((item) => {
+                const Icon = item.icon;
+                const isActive = activePage === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => onSelectPage(item.id)}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs xl:text-sm font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                      isActive
+                        ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
+                        : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/50 border border-transparent'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2.5 truncate">
+                      <Icon
+                        className={`w-4 h-4 shrink-0 ${
+                          isActive ? 'text-cyan-400' : 'text-slate-400'
+                        }`}
+                      />
+                      <span className="truncate">{item.label}</span>
+                    </span>
+
+                    {item.id === 'environment-studio' && environmentsCount > 0 && (
+                      <span className="font-mono text-xs text-emerald-400 tabular-nums ml-1">
+                        {environmentsCount}
+                      </span>
+                    )}
+                    {item.id === 'robot-config' && robotsCount > 0 && (
+                      <span className="font-mono text-xs text-cyan-400 tabular-nums ml-1">
+                        {robotsCount}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+
+          {/* Advanced Sections */}
           <div className="space-y-1 pt-2 border-t border-slate-800/70">
             <button
               onClick={() => setShowAdvanced(!expandedAdvanced)}
               className="w-full px-3 py-1.5 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-300 cursor-pointer"
             >
-              <span>Advanced / More</span>
+              <span>Advanced Sections</span>
               {expandedAdvanced ? (
                 <ChevronDown className="w-3.5 h-3.5" />
               ) : (
@@ -184,8 +218,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </button>
 
             {expandedAdvanced && (
-              <nav className="space-y-1" aria-label="Secondary Navigation">
-                {SECONDARY_ITEMS.map((item) => {
+              <nav className="space-y-1" aria-label="Advanced Navigation">
+                {ADVANCED_ITEMS.map((item) => {
                   const Icon = item.icon;
                   const isActive = activePage === item.id;
                   return (
@@ -207,11 +241,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         <span className="truncate">{item.label}</span>
                       </span>
 
-                      {item.id === 'robot-config' && robotsCount > 0 && (
-                        <span className="font-mono text-xs text-cyan-400 tabular-nums ml-1">
-                          {robotsCount}
-                        </span>
-                      )}
                       {item.id === 'experiment-history' &&
                         totalExperimentsCount > 0 && (
                           <span className="font-mono text-xs text-slate-400 tabular-nums ml-1">

@@ -343,12 +343,26 @@ export function diagnoseExperimentFailure(
     experimentId: exp.id,
     scenarioId: exp.scenarioId,
     scenarioName: exp.scenarioName,
+    scenarioSeed: exp.scenarioSeed ?? matchedScenario?.randomSeed ?? 101,
+    environmentId:
+      exp.environmentId ??
+      matchedScenario?.environmentId ??
+      'env-campus-standard',
+    environmentName:
+      exp.environmentName ??
+      matchedScenario?.environmentName ??
+      'University Campus Testbed',
+    environmentVersion:
+      exp.environmentVersion ??
+      matchedScenario?.environmentVersion ??
+      '1.0',
     policyVersion: exp.policyVersion ?? '2.1.0',
     policyId: exp.policyId,
     policyName: exp.policyName,
     robotId: exp.robotId,
     robotName: exp.robotName,
     robotHardwareSummary: exp.robotHardwareSummary,
+    batteryLevelAtFailurePct: Number(remainingBattery.toFixed(1)),
     failureCategory,
     failureType: fType,
     outcomeDistinction,

@@ -8,6 +8,7 @@ import {
 } from '../data/campusConfig';
 import {
   CampusElevatorConfig,
+  EnvironmentDefinition,
   PedestrianBehaviorClass,
   PedestrianDistributionConfig,
   PredictedConflictPoint,
@@ -15,6 +16,25 @@ import {
   RobotUnitConfig,
   Vector2D,
 } from '../types/simulation';
+
+let activeRuntimeEnvironment: EnvironmentDefinition | null = null;
+
+export function setActiveRuntimeEnvironment(
+  env: EnvironmentDefinition | null
+): void {
+  activeRuntimeEnvironment = env;
+}
+
+export function getActiveRuntimeEnvironment(): EnvironmentDefinition | null {
+  return activeRuntimeEnvironment;
+}
+
+export function isCampusEnvironmentActive(): boolean {
+  return (
+    !activeRuntimeEnvironment ||
+    activeRuntimeEnvironment.id === 'env-campus-main'
+  );
+}
 
 export type CellBlockReason =
   | 'none'
@@ -158,6 +178,26 @@ export function classifyCampusSurface(
   x: number,
   z: number
 ): { isRoadOrPath: boolean; isPrimaryRoad: boolean } {
+  if (!isCampusEnvironmentActive() && activeRuntimeEnvironment) {
+    const halfW = Math.min(37, activeRuntimeEnvironment.widthM / 2 - 2);
+    const halfD = Math.min(37, activeRuntimeEnvironment.depthM / 2 - 2);
+    if (Math.abs(x) > halfW || Math.abs(z) > halfD) {
+      return { isRoadOrPath: false, isPrimaryRoad: false };
+    }
+    const inCorridorOrDoor = activeRuntimeEnvironment.elements.some(
+      (el) =>
+        (el.floor ?? 0) === 0 &&
+        (el.type === 'corridor' || el.type === 'door') &&
+        Math.abs(x - el.x) <= el.width / 2 + 1.0 &&
+        Math.abs(z - el.z) <= el.depth / 2 + 1.0
+    );
+    const onSpine = Math.abs(x) <= 4.0 || Math.abs(z) <= 4.0;
+    return {
+      isRoadOrPath: true,
+      isPrimaryRoad: inCorridorOrDoor || onSpine,
+    };
+  }
+
   // Primary East-West Main Avenue (z in [-3, 3], x in [-36, 36])
   const onMainEW = Math.abs(z) <= 3.0 && Math.abs(x) <= 36;
   // Primary North-South Main Avenue (x in [-3, 3], z in [-36, 36])
@@ -192,8 +232,16 @@ export function getActiveConstructionObstacleBounds(
   const blockedBoxes: CollisionAABB[] = [];
   const restrictedBoxes: CollisionAABB[] = [];
 
-  for (const cz of CONSTRUCTION_ZONES) {
-    if (!activeConstructionIds.includes(cz.id)) continue;
+  const zonesSource =
+    !isCampusEnvironmentActive() && activeRuntimeEnvironment
+      ? activeRuntimeEnvironment.constructionZones
+      : CONSTRUCTION_ZONES;
+
+  for (const cz of zonesSource) {
+    const isActive =
+      activeConstructionIds.includes(cz.id) ||
+      cz.activeInScenarios.includes('all');
+    if (!isActive) continue;
     const [cx, , czPos] = cz.position;
     const [w, d] = cz.size;
 
@@ -242,7 +290,12 @@ export function getAllStaticObstacleBounds(): {
   const boxes: CollisionAABB[] = [];
   const circles: CollisionCircle[] = [];
 
-  for (const bldg of CAMPUS_BUILDINGS) {
+  const buildingsSource =
+    !isCampusEnvironmentActive() && activeRuntimeEnvironment
+      ? activeRuntimeEnvironment.buildings
+      : CAMPUS_BUILDINGS;
+
+  for (const bldg of buildingsSource) {
     const [bx, , bz] = bldg.position;
     const [w, , d] = bldg.size;
     boxes.push({
@@ -256,42 +309,75 @@ export function getAllStaticObstacleBounds(): {
     });
   }
 
-  CAMPUS_BENCHES.forEach(([bx, bz, rotY], idx) => {
-    const isRotated = Math.abs(Math.sin(rotY)) > 0.5;
-    const halfW = isRotated ? 0.35 : 0.95;
-    const halfD = isRotated ? 0.95 : 0.35;
-    boxes.push({
-      id: `bench-${idx}`,
-      name: `Park Bench #${idx + 1}`,
-      type: 'Campus Prop',
-      minX: bx - halfW,
-      maxX: bx + halfW,
-      minZ: bz - halfD,
-      maxZ: bz + halfD,
+  if (isCampusEnvironmentActive()) {
+    CAMPUS_BENCHES.forEach(([bx, bz, rotY], idx) => {
+      const isRotated = Math.abs(Math.sin(rotY)) > 0.5;
+      const halfW = isRotated ? 0.35 : 0.95;
+      const halfD = isRotated ? 0.95 : 0.35;
+      boxes.push({
+        id: `bench-${idx}`,
+        name: `Park Bench #${idx + 1}`,
+        type: 'Campus Prop',
+        minX: bx - halfW,
+        maxX: bx + halfW,
+        minZ: bz - halfD,
+        maxZ: bz + halfD,
+      });
     });
-  });
 
-  CAMPUS_TREES.forEach(([tx, tz], idx) => {
-    circles.push({
-      id: `tree-${idx}`,
-      name: `Campus Tree #${idx + 1}`,
-      type: 'Campus Prop',
-      x: tx,
-      z: tz,
-      radius: 0.65,
+    CAMPUS_TREES.forEach(([tx, tz], idx) => {
+      circles.push({
+        id: `tree-${idx}`,
+        name: `Campus Tree #${idx + 1}`,
+        type: 'Campus Prop',
+        x: tx,
+        z: tz,
+        radius: 0.65,
+      });
     });
-  });
 
-  CAMPUS_STREETLIGHTS.forEach(([lx, lz], idx) => {
-    circles.push({
-      id: `light-${idx}`,
-      name: `Streetlight Pole #${idx + 1}`,
-      type: 'Campus Prop',
-      x: lx,
-      z: lz,
-      radius: 0.25,
+    CAMPUS_STREETLIGHTS.forEach(([lx, lz], idx) => {
+      circles.push({
+        id: `light-${idx}`,
+        name: `Streetlight Pole #${idx + 1}`,
+        type: 'Campus Prop',
+        x: lx,
+        z: lz,
+        radius: 0.25,
+      });
     });
-  });
+  } else if (activeRuntimeEnvironment) {
+    const locs = activeRuntimeEnvironment.locations ?? [];
+    for (const el of activeRuntimeEnvironment.elements ?? []) {
+      if ((el.floor ?? 0) !== 0) continue;
+      if (el.type === 'wall' || el.type === 'obstacle') {
+        const minX = el.x - el.width / 2;
+        const maxX = el.x + el.width / 2;
+        const minZ = el.z - el.depth / 2;
+        const maxZ = el.z + el.depth / 2;
+        // Skip if a location dock is placed right inside/next to this element
+        const blocksDock = locs.some(
+          (l) =>
+            (l.floor ?? 0) === 0 &&
+            l.position[0] >= minX - 1.5 &&
+            l.position[0] <= maxX + 1.5 &&
+            l.position[2] >= minZ - 1.5 &&
+            l.position[2] <= maxZ + 1.5
+        );
+        if (!blocksDock) {
+          boxes.push({
+            id: el.id,
+            name: el.name,
+            type: el.type === 'wall' ? 'Campus Building' : 'Campus Prop',
+            minX,
+            maxX,
+            minZ,
+            maxZ,
+          });
+        }
+      }
+    }
+  }
 
   return { boxes, circles };
 }
@@ -710,9 +796,14 @@ export function getIndoorBuildingCollisionContext(
   const authorizedBuildingIds = new Set<string>();
   const shaftWallBoxes: CollisionAABB[] = [];
 
+  const envElevators =
+    !isCampusEnvironmentActive() && activeRuntimeEnvironment
+      ? activeRuntimeEnvironment.elevators
+      : CAMPUS_ELEVATORS;
+
   const elevatorsToCheck =
-    CAMPUS_ELEVATORS.length > 0
-      ? CAMPUS_ELEVATORS
+    envElevators.length > 0
+      ? envElevators
       : activeElevatorConfig
       ? [activeElevatorConfig]
       : [];

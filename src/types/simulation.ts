@@ -1,6 +1,7 @@
 export type NavPageId =
   | 'overview'
   | 'simulation-lab'
+  | 'environment-studio'
   | 'robot-config'
   | 'scenario-generator'
   | 'failure-analysis'
@@ -218,6 +219,103 @@ export interface ConstructionZoneConfig {
   severity: 'Partial Lane Closure' | 'Full Pathway Blockade' | 'Sensor Hazard Zone';
 }
 
+export type EnvironmentTemplateType =
+  | 'Campus'
+  | 'Warehouse'
+  | 'Hospital'
+  | 'Factory'
+  | 'Office'
+  | 'Shopping Mall'
+  | 'Laboratory'
+  | 'Custom Environment';
+
+export type EnvironmentElementType =
+  | 'wall'
+  | 'corridor'
+  | 'room'
+  | 'door'
+  | 'obstacle'
+  | 'restricted_area'
+  | 'charging_station'
+  | 'start_point'
+  | 'delivery_destination'
+  | 'elevator_shaft';
+
+export interface MapElement2D {
+  id: string;
+  type: EnvironmentElementType;
+  name: string;
+  floor: number;
+  x: number;
+  z: number;
+  width: number;
+  depth: number;
+  height?: number;
+  rotationDeg?: number;
+  color?: string;
+  code?: string;
+  priority?: 'Standard' | 'Priority' | 'Lab Sample';
+  floorsServed?: number[];
+}
+
+export interface ImportedMapMetadata {
+  sourceType: 'floorplan-image' | 'ros-occupancy' | 'geojson' | 'gltf-3d';
+  fileName: string;
+  importedAt: string;
+  metersPerPixel?: number;
+  originWorld?: [number, number];
+  imageDataUrl?: string;
+  modelDataUrl?: string;
+  rosResolution?: number;
+  occupiedThreshold?: number;
+  freeThreshold?: number;
+}
+
+export interface EnvironmentValidationIssue {
+  id: string;
+  severity: 'error' | 'warning' | 'info';
+  category:
+    | 'Scale & Dimensions'
+    | 'Walls & Obstacles'
+    | 'Walkable Regions'
+    | 'Start & Destination'
+    | 'Navigation Connectivity'
+    | 'Multi-Floor & Elevator';
+  message: string;
+  suggestion?: string;
+}
+
+export interface EnvironmentValidationReport {
+  isValid: boolean;
+  canSimulate: boolean;
+  timestamp: string;
+  checkedFloorCount: number;
+  walkableCoveragePct: number;
+  reachableDestinationsCount: number;
+  totalDestinationsCount: number;
+  issues: EnvironmentValidationIssue[];
+}
+
+export interface EnvironmentDefinition {
+  id: string;
+  name: string;
+  version: string;
+  templateType: EnvironmentTemplateType;
+  description: string;
+  widthM: number;
+  depthM: number;
+  gridResolutionM: number;
+  floors: { floor: number; label: string; heightM: number }[];
+  elements: MapElement2D[];
+  buildings: CampusBuilding[];
+  locations: DeliveryLocation[];
+  elevators: CampusElevatorConfig[];
+  constructionZones: ConstructionZoneConfig[];
+  importedMap?: ImportedMapMetadata;
+  isBuiltIn?: boolean;
+  updatedAt: string;
+}
+
 export type RobotCategory =
   | 'courier'
   | 'heavy-logistics'
@@ -354,6 +452,11 @@ export interface ScenarioConfig {
   sourceWeaknessEvidence?: string;
   sourceExperimentIds?: string[];
   recommendedPolicyId: string;
+  environmentId?: string;
+  environmentName?: string;
+  environmentVersion?: string;
+  robotId?: string;
+  payloadKg?: number;
   isCustom?: boolean;
 }
 
@@ -411,6 +514,11 @@ export interface FailureDiagnosisRecord {
   robotId?: string;
   robotName: string;
   robotHardwareSummary?: string;
+  environmentId?: string;
+  environmentName?: string;
+  environmentVersion?: string;
+  scenarioSeed?: number;
+  batteryLevelAtFailurePct?: number;
   /** 4. Failure category */
   failureCategory: FailureCategory;
   failureType: FailureType;
@@ -540,6 +648,8 @@ export interface CandidatePolicyState {
   basePolicyId: string;
   trainedRobotId?: string;
   trainedRobotName?: string;
+  trainedEnvironmentId?: string;
+  trainedEnvironmentName?: string;
   isTrained: boolean;
   totalEpisodesTrained: number;
   lastTrainedAt: string | null;
@@ -621,6 +731,9 @@ export interface BenchmarkAggregateMetrics {
 export interface BenchmarkSuiteResult {
   id: string;
   timestamp: string;
+  environmentId?: string;
+  environmentName?: string;
+  environmentVersion?: string;
   robotId?: string;
   robotName?: string;
   candidatePolicyVersion: string;
@@ -663,6 +776,9 @@ export interface CrossRobotComparisonEntry {
 export interface CrossRobotBenchmarkResult {
   id: string;
   timestamp: string;
+  environmentId?: string;
+  environmentName?: string;
+  environmentVersion?: string;
   scenarioIds: string[];
   scenarioNames: string[];
   policyId: string;
@@ -676,11 +792,14 @@ export interface CrossRobotBenchmarkResult {
   recommendationRationale: string;
 }
 
-export type ExperimentRunType = 'Interactive' | 'Batch' | 'Training' | 'Benchmark';
+export type ExperimentRunType = 'Interactive' | 'Batch' | 'Training' | 'Evaluation' | 'Benchmark';
 
 export interface ExperimentRecord {
   id: string;
   timestamp: string;
+  environmentId?: string;
+  environmentName?: string;
+  environmentVersion?: string;
   scenarioId: string;
   scenarioName: string;
   scenarioSeed?: number;
@@ -689,6 +808,7 @@ export interface ExperimentRecord {
   robotId: string;
   robotName: string;
   robotHardwareSummary?: string;
+  robotConfigSnapshot?: RobotUnitConfig;
   payloadKg?: number;
   policyId: string;
   policyName: string;
@@ -747,6 +867,8 @@ export interface ExperimentRecord {
 
 export interface LiveTelemetry {
   simulationState: SimulationRunState;
+  environmentId?: string;
+  environmentName?: string;
   robotId: string;
   robotName: string;
   robotStatus: RobotOperationalState;

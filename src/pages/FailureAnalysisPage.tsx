@@ -52,6 +52,7 @@ export const FailureAnalysisPage: React.FC<FailureAnalysisPageProps> = ({
   const {
     experiments,
     scenarios,
+    activeEnvironment,
     failureDiagnoses,
     weaknessClusters,
     addCustomScenariosBatch,
@@ -80,12 +81,13 @@ export const FailureAnalysisPage: React.FC<FailureAnalysisPageProps> = ({
       experiments,
       scenarios,
       2,
-      Math.floor(Date.now() % 9000) + 1000
+      Math.floor(Date.now() % 9000) + 1000,
+      activeEnvironment
     );
     addCustomScenariosBatch(batch.generatedScenarios);
     recordFailureDrivenBatch(batch);
     setGeneratedNotice(
-      `Synthesized ${batch.generatedScenarios.length} Failure-Driven Scenarios targeting [${batch.weaknessesDiscovered
+      `Synthesized ${batch.generatedScenarios.length} Failure-Driven Scenarios for ${activeEnvironment.name} targeting [${batch.weaknessesDiscovered
         .map((w) => w.category)
         .join(', ')}] and added to Synthetic Scenario Factory.`
     );
@@ -265,15 +267,20 @@ export const FailureAnalysisPage: React.FC<FailureAnalysisPageProps> = ({
                   const isSafeStop = d.outcomeDistinction === 'Safe Stop (Blocked/Fault)';
                   return (
                     <div key={d.id} className="p-5 space-y-3.5">
-                      {/* Top Header: Experiment, Scenario, Policy + Outcome Distinction */}
+                      {/* Top Header: Experiment, Environment, Scenario+Seed, Policy+Version, Robot+Hardware + Outcome Distinction */}
                       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-mono text-rose-400 font-semibold">
                             Exp: {d.experimentId}
                           </span>
                           <span className="text-slate-600">·</span>
+                          <span className="font-mono text-sky-300">
+                            Env: {d.environmentName ?? 'University Campus'} (v
+                            {d.environmentVersion ?? '1.0'})
+                          </span>
+                          <span className="text-slate-600">·</span>
                           <span className="font-mono text-slate-300">
-                            Scenario: {d.scenarioId}
+                            Scenario: {d.scenarioId} (Seed {d.scenarioSeed ?? 101})
                           </span>
                           <span className="text-slate-600">·</span>
                           <span className="font-mono text-cyan-400">
@@ -286,6 +293,14 @@ export const FailureAnalysisPage: React.FC<FailureAnalysisPageProps> = ({
                           >
                             Robot: {d.robotName}
                           </span>
+                          {d.batteryLevelAtFailurePct !== undefined && (
+                            <>
+                              <span className="text-slate-600">·</span>
+                              <span className="font-mono text-amber-300">
+                                Battery: {d.batteryLevelAtFailurePct.toFixed(1)}%
+                              </span>
+                            </>
+                          )}
                         </div>
                         <span
                           className={`px-2 py-0.5 rounded font-mono text-[11px] border ${

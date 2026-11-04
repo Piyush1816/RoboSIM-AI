@@ -4,12 +4,22 @@ import {
   NAVIGATION_POLICIES,
   ROBOT_UNITS,
 } from '../data/campusConfig';
+import {
+  BUILTIN_ENVIRONMENTS,
+  syncEnvironmentDerivedStructures,
+} from '../data/environmentTemplates';
+import {
+  loadAllWorkspaceCategoriesFromCloud,
+  saveWorkspaceCategoryToCloud,
+  WorkspaceCategoryKey,
+} from '../firebase/firebaseClient';
 import { diagnoseExperimentFailure } from '../simulation/failureIntelligence';
 import { createInitialCandidatePolicyState } from '../simulation/policyLearner';
 import {
   BenchmarkSuiteResult,
   CandidatePolicyState,
   CrossRobotBenchmarkResult,
+  EnvironmentDefinition,
   ExperimentRecord,
   FailureDiagnosisRecord,
   FailureDrivenGenerationBatch,
@@ -31,7 +41,24 @@ export const STORAGE_KEYS = {
   DEMO_MODE: 'robosim_ai_demo_mode_v1',
   ROBOTS: 'robosim_ai_custom_robots_v1',
   SELECTED_ROBOT_ID: 'robosim_ai_selected_robot_id_v1',
+  ENVIRONMENTS: 'robosim_ai_custom_environments_v1',
+  SELECTED_ENVIRONMENT_ID: 'robosim_ai_selected_environment_id_v1',
 };
+
+let activeCloudUid: string | null = null;
+
+export function setActiveCloudUserId(uid: string | null): void {
+  activeCloudUid = uid;
+}
+
+export function getActiveCloudUserId(): string | null {
+  return activeCloudUid;
+}
+
+function triggerCloudSync(category: WorkspaceCategoryKey, payload: unknown): void {
+  if (!activeCloudUid) return;
+  void saveWorkspaceCategoryToCloud(activeCloudUid, category, payload);
+}
 
 export const STORE_SYNC_EVENT = 'robosim_ai_store_sync_v1';
 const BROADCAST_CHANNEL_NAME = 'robosim_ai_broadcast_v1';
@@ -177,6 +204,8 @@ export function saveStoredExperiment(record: ExperimentRecord): ExperimentRecord
       localStorage.setItem(STORAGE_KEYS.EXPERIMENTS, JSON.stringify(updated));
       const failureRecords = deriveFailureRecordsFromExperiments(updated);
       localStorage.setItem(STORAGE_KEYS.FAILURES, JSON.stringify(failureRecords));
+      triggerCloudSync('experiments', updated);
+      triggerCloudSync('failures', failureRecords);
     }
     notifyStoreSubscribers();
     return updated;
@@ -197,6 +226,8 @@ export function saveStoredExperimentsBatch(
       localStorage.setItem(STORAGE_KEYS.EXPERIMENTS, JSON.stringify(updated));
       const failureRecords = deriveFailureRecordsFromExperiments(updated);
       localStorage.setItem(STORAGE_KEYS.FAILURES, JSON.stringify(failureRecords));
+      triggerCloudSync('experiments', updated);
+      triggerCloudSync('failures', failureRecords);
     }
     notifyStoreSubscribers();
     return updated;
@@ -561,6 +592,7 @@ export function saveCustomScenario(scenario: ScenarioConfig): ScenarioConfig[] {
     const filtered = custom.filter((c) => c.id !== scenario.id);
     const updatedCustom = [...filtered, { ...scenario, isCustom: true }];
     localStorage.setItem(STORAGE_KEYS.SCENARIOS, JSON.stringify(updatedCustom));
+    triggerCloudSync('scenarios', updatedCustom);
     notifyStoreSubscribers();
     return [...DEFAULT_SCENARIOS, ...updatedCustom];
   } catch {
@@ -587,6 +619,7 @@ export function saveCustomScenariosBatch(
       ...newScenarios.map((s) => ({ ...s, isCustom: true })),
     ];
     localStorage.setItem(STORAGE_KEYS.SCENARIOS, JSON.stringify(updatedCustom));
+    triggerCloudSync('scenarios', updatedCustom);
     notifyStoreSubscribers();
     return [...DEFAULT_SCENARIOS, ...updatedCustom];
   } catch {
@@ -621,6 +654,7 @@ export function savePolicies(policies: NavigationPolicyConfig[]): void {
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEYS.POLICIES, JSON.stringify(policies));
+      triggerCloudSync('policies', policies);
     }
     notifyStoreSubscribers();
   } catch {
@@ -649,6 +683,7 @@ export function saveCandidatePolicyState(state: CandidatePolicyState): void {
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEYS.CANDIDATE_POLICY, JSON.stringify(state));
+      triggerCloudSync('candidatePolicy', state);
     }
     notifyStoreSubscribers();
   } catch {
@@ -682,6 +717,7 @@ export function saveBenchmarkResult(
     const updated = [result, ...current.filter((b) => b.id !== result.id)];
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEYS.BENCHMARKS, JSON.stringify(updated));
+      triggerCloudSync('benchmarks', updated);
     }
     notifyStoreSubscribers();
     return updated;
@@ -710,6 +746,7 @@ export function saveFailureDrivenBatch(
     const updated = [batch, ...current];
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEYS.FD_BATCHES, JSON.stringify(updated));
+      triggerCloudSync('fdBatches', updated);
     }
     notifyStoreSubscribers();
     return updated;
@@ -731,6 +768,11 @@ export function saveDemoPreviewPreference(enabled: boolean): void {
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEYS.DEMO_MODE, enabled ? 'true' : 'false');
+      triggerCloudSync('preferences', {
+        selectedRobotId: loadSelectedRobotId(),
+        selectedEnvironmentId: loadSelectedEnvironmentId(),
+        demoPreviewEnabled: enabled,
+      });
     }
     notifyStoreSubscribers();
   } catch {
@@ -781,6 +823,7 @@ export function saveCustomRobot(robot: RobotUnitConfig): RobotUnitConfig[] {
       : [];
     const updatedCustom = [...filtered, normalized];
     localStorage.setItem(STORAGE_KEYS.ROBOTS, JSON.stringify(updatedCustom));
+    triggerCloudSync('robots', updatedCustom);
     notifyStoreSubscribers();
     return [...ROBOT_UNITS, ...updatedCustom];
   } catch {
@@ -797,6 +840,7 @@ export function deleteCustomRobot(robotId: string): RobotUnitConfig[] {
       ? custom.filter((r) => r && r.id !== robotId)
       : [];
     localStorage.setItem(STORAGE_KEYS.ROBOTS, JSON.stringify(updatedCustom));
+    triggerCloudSync('robots', updatedCustom);
     if (loadSelectedRobotId() === robotId) {
       saveSelectedRobotId(ROBOT_UNITS[0].id);
     }
@@ -825,6 +869,11 @@ export function saveSelectedRobotId(robotId: string): void {
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEYS.SELECTED_ROBOT_ID, robotId);
+      triggerCloudSync('preferences', {
+        selectedRobotId: robotId,
+        selectedEnvironmentId: loadSelectedEnvironmentId(),
+        demoPreviewEnabled: loadDemoPreviewPreference(),
+      });
     }
     notifyStoreSubscribers();
   } catch {
@@ -852,6 +901,7 @@ export function saveCrossRobotBenchmarkResult(
     const updated = [result, ...current.filter((b) => b.id !== result.id)];
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEYS.ROBOT_BENCHMARKS, JSON.stringify(updated));
+      triggerCloudSync('robotBenchmarks', updated);
     }
     notifyStoreSubscribers();
     return updated;
@@ -859,4 +909,237 @@ export function saveCrossRobotBenchmarkResult(
     return [result];
   }
 }
+
+export function loadEnvironments(): EnvironmentDefinition[] {
+  try {
+    if (typeof localStorage === 'undefined') return BUILTIN_ENVIRONMENTS;
+    const raw = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
+    if (!raw) return BUILTIN_ENVIRONMENTS;
+    const custom: EnvironmentDefinition[] = JSON.parse(raw);
+    if (!Array.isArray(custom)) return BUILTIN_ENVIRONMENTS;
+    const customById = new Map<string, EnvironmentDefinition>();
+    for (const c of custom) {
+      if (c && c.id) {
+        customById.set(c.id, syncEnvironmentDerivedStructures(c));
+      }
+    }
+    const mergedBuiltIns = BUILTIN_ENVIRONMENTS.map((b) =>
+      customById.has(b.id) ? customById.get(b.id)! : b
+    );
+    const builtInIds = new Set(BUILTIN_ENVIRONMENTS.map((b) => b.id));
+    const uniqueCustom = Array.from(customById.values()).filter(
+      (c) => !builtInIds.has(c.id)
+    );
+    return [...mergedBuiltIns, ...uniqueCustom];
+  } catch {
+    return BUILTIN_ENVIRONMENTS;
+  }
+}
+
+export function saveCustomEnvironment(
+  env: EnvironmentDefinition
+): EnvironmentDefinition[] {
+  try {
+    const synced = syncEnvironmentDerivedStructures({
+      ...env,
+      updatedAt: new Date().toISOString(),
+    });
+    if (typeof localStorage === 'undefined') {
+      return [...BUILTIN_ENVIRONMENTS, synced];
+    }
+    const raw = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
+    const custom: EnvironmentDefinition[] = raw ? JSON.parse(raw) : [];
+    const filtered = Array.isArray(custom)
+      ? custom.filter((c) => c && c.id !== synced.id)
+      : [];
+    const updatedCustom = [...filtered, synced];
+    localStorage.setItem(STORAGE_KEYS.ENVIRONMENTS, JSON.stringify(updatedCustom));
+    triggerCloudSync('environments', updatedCustom);
+    notifyStoreSubscribers();
+    return loadEnvironments();
+  } catch {
+    return BUILTIN_ENVIRONMENTS;
+  }
+}
+
+export function deleteCustomEnvironment(envId: string): EnvironmentDefinition[] {
+  try {
+    if (typeof localStorage === 'undefined') return BUILTIN_ENVIRONMENTS;
+    const raw = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
+    const custom: EnvironmentDefinition[] = raw ? JSON.parse(raw) : [];
+    const updatedCustom = Array.isArray(custom)
+      ? custom.filter((c) => c && c.id !== envId)
+      : [];
+    localStorage.setItem(STORAGE_KEYS.ENVIRONMENTS, JSON.stringify(updatedCustom));
+    triggerCloudSync('environments', updatedCustom);
+    if (loadSelectedEnvironmentId() === envId) {
+      saveSelectedEnvironmentId(BUILTIN_ENVIRONMENTS[0].id);
+    }
+    notifyStoreSubscribers();
+    return loadEnvironments();
+  } catch {
+    return BUILTIN_ENVIRONMENTS;
+  }
+}
+
+export function loadSelectedEnvironmentId(): string {
+  try {
+    if (typeof localStorage === 'undefined') return BUILTIN_ENVIRONMENTS[0].id;
+    const saved = localStorage.getItem(STORAGE_KEYS.SELECTED_ENVIRONMENT_ID);
+    const allEnvs = loadEnvironments();
+    if (saved && allEnvs.some((e) => e.id === saved)) {
+      return saved;
+    }
+    return BUILTIN_ENVIRONMENTS[0].id;
+  } catch {
+    return BUILTIN_ENVIRONMENTS[0].id;
+  }
+}
+
+export function saveSelectedEnvironmentId(envId: string): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(STORAGE_KEYS.SELECTED_ENVIRONMENT_ID, envId);
+    triggerCloudSync('preferences', {
+      selectedRobotId: loadSelectedRobotId(),
+      selectedEnvironmentId: envId,
+      demoPreviewEnabled: loadDemoPreviewPreference(),
+    });
+    notifyStoreSubscribers();
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Safely merges localStorage data with the authenticated user's Firestore workspace.
+ * Never deletes local user data — merges by ID and pushes the unified state back to Firestore.
+ */
+export async function hydrateAndMigrateUserWorkspace(uid: string): Promise<{
+  migratedCounts: {
+    robots: number;
+    environments: number;
+    scenarios: number;
+    experiments: number;
+    benchmarks: number;
+  };
+}> {
+  setActiveCloudUserId(uid);
+  const cloudData = await loadAllWorkspaceCategoriesFromCloud(uid);
+
+  const mergeById = <T extends { id: string }>(
+    localArr: T[],
+    cloudArr: unknown
+  ): T[] => {
+    const map = new Map<string, T>();
+    if (Array.isArray(cloudArr)) {
+      for (const item of cloudArr) {
+        if (item && typeof item === 'object' && 'id' in item) {
+          map.set((item as T).id, item as T);
+        }
+      }
+    }
+    for (const item of localArr) {
+      if (item && item.id) {
+        map.set(item.id, item);
+      }
+    }
+    return Array.from(map.values());
+  };
+
+  // 1. Custom Robots
+  const rawLocalRobots = localStorage.getItem(STORAGE_KEYS.ROBOTS);
+  const localCustomRobots: RobotUnitConfig[] = rawLocalRobots
+    ? JSON.parse(rawLocalRobots)
+    : [];
+  const mergedRobots = mergeById(localCustomRobots, cloudData.robots);
+  localStorage.setItem(STORAGE_KEYS.ROBOTS, JSON.stringify(mergedRobots));
+  await saveWorkspaceCategoryToCloud(uid, 'robots', mergedRobots);
+
+  // 2. Custom Environments
+  const rawLocalEnvs = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
+  const localCustomEnvs: EnvironmentDefinition[] = rawLocalEnvs
+    ? JSON.parse(rawLocalEnvs)
+    : [];
+  const mergedEnvs = mergeById(localCustomEnvs, cloudData.environments);
+  localStorage.setItem(STORAGE_KEYS.ENVIRONMENTS, JSON.stringify(mergedEnvs));
+  await saveWorkspaceCategoryToCloud(uid, 'environments', mergedEnvs);
+
+  // 3. Custom Scenarios
+  const rawLocalScens = localStorage.getItem(STORAGE_KEYS.SCENARIOS);
+  const localCustomScens: ScenarioConfig[] = rawLocalScens
+    ? JSON.parse(rawLocalScens)
+    : [];
+  const mergedScens = mergeById(localCustomScens, cloudData.scenarios);
+  localStorage.setItem(STORAGE_KEYS.SCENARIOS, JSON.stringify(mergedScens));
+  await saveWorkspaceCategoryToCloud(uid, 'scenarios', mergedScens);
+
+  // 4. Experiments & Failures
+  const localExps = loadStoredExperiments();
+  const mergedExps = mergeById(localExps, cloudData.experiments);
+  localStorage.setItem(STORAGE_KEYS.EXPERIMENTS, JSON.stringify(mergedExps));
+  const derivedFailures = deriveFailureRecordsFromExperiments(mergedExps);
+  localStorage.setItem(STORAGE_KEYS.FAILURES, JSON.stringify(derivedFailures));
+  await saveWorkspaceCategoryToCloud(uid, 'experiments', mergedExps);
+  await saveWorkspaceCategoryToCloud(uid, 'failures', derivedFailures);
+
+  // 5. Candidate Policy State
+  const localCand = loadCandidatePolicyState();
+  const cloudCand = cloudData.candidatePolicy as CandidatePolicyState | undefined;
+  const activeCand =
+    cloudCand &&
+    (cloudCand.totalEpisodesTrained ?? 0) > (localCand.totalEpisodesTrained ?? 0)
+      ? cloudCand
+      : localCand;
+  localStorage.setItem(STORAGE_KEYS.CANDIDATE_POLICY, JSON.stringify(activeCand));
+  await saveWorkspaceCategoryToCloud(uid, 'candidatePolicy', activeCand);
+
+  // 6. Benchmarks & Cross-Robot Benchmarks
+  const localBench = loadBenchmarkHistory();
+  const mergedBench = mergeById(localBench, cloudData.benchmarks);
+  localStorage.setItem(STORAGE_KEYS.BENCHMARKS, JSON.stringify(mergedBench));
+  await saveWorkspaceCategoryToCloud(uid, 'benchmarks', mergedBench);
+
+  const localRobotBench = loadCrossRobotBenchmarkHistory();
+  const mergedRobotBench = mergeById(localRobotBench, cloudData.robotBenchmarks);
+  localStorage.setItem(
+    STORAGE_KEYS.ROBOT_BENCHMARKS,
+    JSON.stringify(mergedRobotBench)
+  );
+  await saveWorkspaceCategoryToCloud(uid, 'robotBenchmarks', mergedRobotBench);
+
+  // 7. Preferences
+  const cloudPrefs = cloudData.preferences as
+    | {
+        selectedRobotId?: string;
+        selectedEnvironmentId?: string;
+        demoPreviewEnabled?: boolean;
+      }
+    | undefined;
+  if (cloudPrefs?.selectedRobotId && !localStorage.getItem(STORAGE_KEYS.SELECTED_ROBOT_ID)) {
+    localStorage.setItem(STORAGE_KEYS.SELECTED_ROBOT_ID, cloudPrefs.selectedRobotId);
+  }
+  if (
+    cloudPrefs?.selectedEnvironmentId &&
+    !localStorage.getItem(STORAGE_KEYS.SELECTED_ENVIRONMENT_ID)
+  ) {
+    localStorage.setItem(
+      STORAGE_KEYS.SELECTED_ENVIRONMENT_ID,
+      cloudPrefs.selectedEnvironmentId
+    );
+  }
+
+  notifyStoreSubscribers();
+
+  return {
+    migratedCounts: {
+      robots: mergedRobots.length,
+      environments: mergedEnvs.length,
+      scenarios: mergedScens.length,
+      experiments: mergedExps.length,
+      benchmarks: mergedBench.length + mergedRobotBench.length,
+    },
+  };
+}
+
 

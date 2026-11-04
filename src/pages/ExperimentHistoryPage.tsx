@@ -68,6 +68,11 @@ export const ExperimentHistoryPage: React.FC<ExperimentHistoryPageProps> = ({
     const headers = [
       'ID',
       'Timestamp',
+      'EnvironmentID',
+      'EnvironmentName',
+      'EnvironmentVersion',
+      'RobotID',
+      'RobotName',
       'ScenarioID',
       'ScenarioName',
       'GenerationSource',
@@ -88,6 +93,11 @@ export const ExperimentHistoryPage: React.FC<ExperimentHistoryPageProps> = ({
     const rows = filtered.map((e) => [
       e.id,
       `"${e.timestamp}"`,
+      e.environmentId ?? 'env-campus-standard',
+      `"${e.environmentName ?? 'University Campus Testbed'}"`,
+      `"${e.environmentVersion ?? '1.0'}"`,
+      e.robotId,
+      `"${e.robotName}"`,
       e.scenarioId,
       `"${e.scenarioName}"`,
       e.scenarioGenerationSource ?? 'Preset',
@@ -126,11 +136,12 @@ export const ExperimentHistoryPage: React.FC<ExperimentHistoryPageProps> = ({
             PERSISTENT AUDIT LOG · INTERACTIVE, BATCH, TRAINING & BENCHMARK RUNS
           </div>
           <h2 className="font-display text-xl font-semibold text-slate-100">
-            Experiment History & Episode Telemetry Archive
+            Experiment History & Reproducible Episode Archive
           </h2>
           <p className="text-sm text-slate-400">
-            Filter, inspect, and export all autonomous delivery episodes across Baseline and
-            Trained Candidate policies. Click any row to inspect its decision trace.
+            Each record preserves an immutable snapshot of the Environment & Version, Robot Hardware
+            Configuration, Scenario & Seed, Policy & Version, Training/Evaluation Mode, and Outcome
+            Telemetry.
           </p>
         </div>
 
@@ -172,7 +183,7 @@ export const ExperimentHistoryPage: React.FC<ExperimentHistoryPageProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Filter by Experiment ID, scenario ID/name, policy, or failure category..."
+              placeholder="Filter by Experiment ID, environment, scenario, robot, policy, or failure..."
               className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
             />
           </div>
@@ -237,11 +248,11 @@ export const ExperimentHistoryPage: React.FC<ExperimentHistoryPageProps> = ({
             <table className="w-full text-left border-collapse text-xs">
               <thead>
                 <tr className="border-b border-slate-800 text-[11px] text-slate-400 bg-slate-900/40">
-                  <th className="py-3 px-3">Experiment ID</th>
+                  <th className="py-3 px-3">Experiment ID & Mode</th>
                   <th className="py-3 px-3">Timestamp</th>
-                  <th className="py-3 px-3">Scenario ID & Name</th>
+                  <th className="py-3 px-3">Environment & Scenario</th>
                   <th className="py-3 px-3">Source & Seed</th>
-                  <th className="py-3 px-3">Policy & Version</th>
+                  <th className="py-3 px-3">Policy & Robot</th>
                   <th className="py-3 px-3">Mission Status</th>
                   <th className="py-3 px-3 text-right">Time</th>
                   <th className="py-3 px-3 text-right">Dist</th>
@@ -264,8 +275,8 @@ export const ExperimentHistoryPage: React.FC<ExperimentHistoryPageProps> = ({
                       >
                         <td className="py-3 px-3 font-mono text-slate-200 whitespace-nowrap">
                           <div>{exp.id}</div>
-                          <div className="text-[10px] text-slate-500">
-                            {exp.runType ?? 'Interactive'}
+                          <div className="text-[10px] text-cyan-400">
+                            {exp.runType ?? 'Interactive'} Mode
                           </div>
                         </td>
                         <td className="py-3 px-3 font-mono text-slate-400 whitespace-nowrap tabular-nums">
@@ -273,6 +284,10 @@ export const ExperimentHistoryPage: React.FC<ExperimentHistoryPageProps> = ({
                         </td>
                         <td className="py-3 px-3">
                           <div className="font-medium text-slate-100">{exp.scenarioName}</div>
+                          <div className="text-[10px] font-mono text-sky-400">
+                            Env: {exp.environmentName ?? 'University Campus'} (v
+                            {exp.environmentVersion ?? '1.0'})
+                          </div>
                           <div className="text-[10px] font-mono text-slate-500">
                             {exp.scenarioId} · {exp.originName} → {exp.destinationName}
                           </div>
@@ -366,11 +381,26 @@ export const ExperimentHistoryPage: React.FC<ExperimentHistoryPageProps> = ({
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                               <div className="p-3 rounded-lg bg-[#0d1322] border border-slate-800 space-y-1">
                                 <div className="text-[11px] font-semibold text-cyan-400">
-                                  Robot Hardware & Environmental Conditions
+                                  Immutable Environment & Robot Hardware Snapshot
+                                </div>
+                                <div className="font-mono text-sky-300 text-[11px]">
+                                  Env: {exp.environmentName ?? 'University Campus Testbed'} (ID:{' '}
+                                  {exp.environmentId ?? 'env-campus-standard'} · v
+                                  {exp.environmentVersion ?? '1.0'})
                                 </div>
                                 {exp.robotHardwareSummary && (
                                   <div className="font-mono text-emerald-300 text-[11px]">
                                     {exp.robotHardwareSummary}
+                                  </div>
+                                )}
+                                {exp.robotConfigSnapshot && (
+                                  <div className="font-mono text-slate-400 text-[10px]">
+                                    Snapshot: {exp.robotConfigSnapshot.maxSpeedMps} m/s · Acc{' '}
+                                    {exp.robotConfigSnapshot.accelerationMps2} m/s² · r=
+                                    {exp.robotConfigSnapshot.collisionRadiusM}m · LiDAR{' '}
+                                    {exp.robotConfigSnapshot.lidarRangeM}m · Cap{' '}
+                                    {exp.robotConfigSnapshot.payloadCapacityKg}kg ·{' '}
+                                    {exp.robotConfigSnapshot.batteryCapacityWh}Wh
                                   </div>
                                 )}
                                 <div className="font-mono text-slate-300 text-[11px]">

@@ -36,6 +36,7 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
     selectedRobotId,
     activeRobot,
     setSelectedRobotId,
+    activeEnvironment,
     candidatePolicyState,
     benchmarkHistory,
     crossRobotBenchmarks,
@@ -106,7 +107,7 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
     setProgressInfo({
       completed: 0,
       total: activeScens.length * episodesPerScenario * 2,
-      label: `Initializing Held-Out Benchmark Suite on ${activeRobot.name}...`,
+      label: `Initializing Held-Out Benchmark Suite on ${activeRobot.name} in ${activeEnvironment.name}...`,
     });
 
     const { benchmarkResult, recordedExperiments } =
@@ -116,6 +117,7 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
         candidatePolicyState,
         episodesPerScenario,
         robotId: selectedRobotId,
+        environment: activeEnvironment,
         onProgress: (completed, total, label) => {
           setProgressInfo({ completed, total, label });
         },
@@ -138,7 +140,7 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
     setHardwareProgress({
       completed: 0,
       total: chosenRobots.length * activeScens.length,
-      label: 'Evaluating fleet hardware across identical scenarios...',
+      label: `Evaluating fleet hardware in ${activeEnvironment.name}...`,
     });
 
     const { benchmarkResult, recordedExperiments } =
@@ -146,6 +148,7 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
         robots: chosenRobots,
         scenarios: activeScens,
         policy: evalPol,
+        environment: activeEnvironment,
         candidatePolicyState,
         requestedPayloadKg: hardwarePayloadKg,
         onProgress: (completed, total, label) => {
@@ -220,7 +223,7 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div className="space-y-1 max-w-3xl">
             <div className="text-xs font-medium text-cyan-400">
-              DUAL EVALUATION SUITE · SOFTWARE POLICY COMPARISON & CROSS-ROBOT HARDWARE BENCHMARKING
+              DUAL EVALUATION SUITE · ENVIRONMENT: {activeEnvironment.name.toUpperCase()} (v{activeEnvironment.version})
             </div>
             <h2 className="font-display text-xl font-semibold text-slate-100">
               {benchmarkTab === 'policy'
@@ -232,14 +235,15 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
                 <>
                   Compares the <strong>Baseline Policy</strong> against the{' '}
                   <strong>Candidate / Learned Policy (v{candidatePolicyState.version})</strong> on{' '}
-                  <strong className="text-cyan-300">{activeRobot.name}</strong> across the exact
-                  same held-out test scenarios and random seeds.
+                  <strong className="text-cyan-300">{activeRobot.name}</strong> in{' '}
+                  <strong className="text-emerald-300">{activeEnvironment.name}</strong> across the exact
+                  same held-out test scenarios and random seeds (Frozen Q-Table, No Training Updates).
                 </>
               ) : (
                 <>
                   Evaluates multiple <strong>Robot Hardware Configurations</strong> (speed, braking,
                   chassis footprint, LiDAR range, battery capacity, and payload capacity) side-by-side
-                  under identical scenarios and seeds.
+                  in <strong className="text-emerald-300">{activeEnvironment.name}</strong> under identical scenarios and seeds.
                 </>
               )}
             </p>

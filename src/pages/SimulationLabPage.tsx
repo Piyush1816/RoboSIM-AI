@@ -86,7 +86,14 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
   onLogEvent,
   onSimulationComplete,
 }) => {
-  const { robots, activeRobot } = useExperimentStore();
+  const {
+    robots,
+    activeRobot,
+    environments,
+    selectedEnvironmentId,
+    activeEnvironment,
+    setSelectedEnvironmentId,
+  } = useExperimentStore();
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
   const sceneManagerRef = useRef<CampusSceneManager | null>(null);
 
@@ -117,6 +124,12 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
   const [showPathLine, setShowPathLine] = useState<boolean>(true);
   const [showSensorCone, setShowSensorCone] = useState<boolean>(true);
   const [showCollisionDebug, setShowCollisionDebug] = useState<boolean>(false);
+
+  const availableLocations = useMemo(() => {
+    return activeEnvironment?.locations && activeEnvironment.locations.length > 0
+      ? activeEnvironment.locations
+      : DELIVERY_LOCATIONS;
+  }, [activeEnvironment]);
 
   const filteredScenarios = useMemo(() => {
     const filtered = scenarios.filter((s) => {
@@ -267,7 +280,8 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
         onLogEvent: (l) => callbacksRef.current.onLogEvent(l),
         onSimulationComplete: (p) =>
           callbacksRef.current.onSimulationComplete(p),
-      }
+      },
+      activeEnvironment
     );
     sceneManagerRef.current = manager;
 
@@ -306,7 +320,7 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Reset any manual overrides and sync scenario defaults whenever the active scenario changes
+  // Reset any manual overrides and sync scenario defaults whenever the active scenario or environment changes
   useEffect(() => {
     setDestinationOverrideId('');
     setOriginOverrideId('');
@@ -345,26 +359,23 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
     sceneManagerRef.current?.setVisualLayers({
       showBuildingCutaway: needsCutaway,
     });
-  }, [selectedScenarioId, activeScenario]);
+  }, [selectedScenarioId, activeScenario, selectedEnvironmentId]);
 
   // Sync configuration changes without re-creating WebGLRenderer
   useEffect(() => {
     if (!sceneManagerRef.current) return;
-    const effectiveScenario: ScenarioConfig = originOverrideId
-      ? {
-          ...activeScenario,
-          originId: originOverrideId,
-          elevatorFaultMode,
-        }
-      : {
-          ...activeScenario,
-          elevatorFaultMode,
-        };
+    const effectiveScenario: ScenarioConfig = {
+      ...activeScenario,
+      originId: originOverrideId || activeScenario.originId,
+      elevatorFaultMode,
+    };
     sceneManagerRef.current.setConfiguration(
       effectiveScenario,
       activePolicy,
       selectedRobotId,
-      destinationOverrideId || null
+      destinationOverrideId || null,
+      originOverrideId || null,
+      activeEnvironment
     );
   }, [
     activeScenario,
@@ -373,6 +384,7 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
     destinationOverrideId,
     originOverrideId,
     elevatorFaultMode,
+    activeEnvironment,
   ]);
 
   const handleReturnToNormalOperation = () => {
@@ -817,13 +829,13 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
                   </div>
                 </div>
 
-                {/* AREA A: Simulation Setup (Scenario Filter + 4 Clean Selectors) */}
+                {/* AREA A: Simulation Setup (Scenario Filter + 6 Clean Pre-Simulation Selectors) */}
                 <div className="space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
                       <Filter className="w-3 h-3 text-cyan-400" />
                       <span className="font-semibold text-slate-300">
-                        Simulation Setup
+                        Simulation Setup (6 Parameters)
                       </span>
                       <span>— Filter Scenario Library:</span>
                     </div>
@@ -871,31 +883,36 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
                           {tab.label}
                         </button>
                       ))}
+                      {onNavigate && (
+                        <button
+                          onClick={() => onNavigate('environment-studio')}
+                          className="ml-1 px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 cursor-pointer"
+                        >
+                          Edit Map in Environment Studio →
+                        </button>
+                      )}
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5">
-                    {/* 1. Scenario Selection */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-2">
+                    {/* 1. Environment Selection */}
                     <div className="min-w-0">
                       <label className="block text-[11px] text-slate-400 mb-1 truncate">
-                        1. Scenario ({filteredScenarios.length} available)
+                        1. Environment
                       </label>
                       <select
-                        value={selectedScenarioId}
+                        value={selectedEnvironmentId}
                         onChange={(e) => {
                           setDestinationOverrideId('');
                           setOriginOverrideId('');
                           setActiveElevatorCaseId('');
-                          onChangeScenario(e.target.value);
+                          setSelectedEnvironmentId(e.target.value);
                         }}
-                        className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
+                        className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
                       >
-                        {filteredScenarios.map((scen) => (
-                          <option key={scen.id} value={scen.id}>
-                            {scen.name}{' '}
-                            {scen.generationSource === 'Failure-Driven'
-                              ? '[Failure-Driven]'
-                              : `(${scen.category})`}
+                        {environments.map((env) => (
+                          <option key={env.id} value={env.id}>
+                            {env.name} ({env.templateType} · {env.floors.length}F)
                           </option>
                         ))}
                       </select>
@@ -909,7 +926,7 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
                       <select
                         value={selectedRobotId}
                         onChange={(e) => onChangeRobot(e.target.value)}
-                        className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
+                        className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
                       >
                         {robots.map((bot) => (
                           <option key={bot.id} value={bot.id}>
@@ -919,10 +936,72 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
                       </select>
                     </div>
 
-                    {/* 3. Delivery Destination Selection */}
+                    {/* 3. Scenario Selection */}
                     <div className="min-w-0">
                       <label className="block text-[11px] text-slate-400 mb-1 truncate">
-                        3. Delivery Destination (Auto-selects Lift if Multi-Floor)
+                        3. Scenario ({filteredScenarios.length})
+                      </label>
+                      <select
+                        value={selectedScenarioId}
+                        onChange={(e) => {
+                          setDestinationOverrideId('');
+                          setOriginOverrideId('');
+                          setActiveElevatorCaseId('');
+                          onChangeScenario(e.target.value);
+                        }}
+                        className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
+                      >
+                        {filteredScenarios.map((scen) => (
+                          <option key={scen.id} value={scen.id}>
+                            {scen.name}{' '}
+                            {scen.generationSource === 'Failure-Driven'
+                              ? '[Failure-Driven]'
+                              : `(${scen.category})`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* 4. Starting Point Selection */}
+                    <div className="min-w-0">
+                      <label className="block text-[11px] text-slate-400 mb-1 truncate">
+                        4. Starting Point
+                      </label>
+                      <select
+                        value={originOverrideId || activeScenario.originId}
+                        onChange={(e) => {
+                          setActiveElevatorCaseId('');
+                          setOriginOverrideId(e.target.value);
+                          const origLoc = availableLocations.find(
+                            (l) => l.id === e.target.value
+                          );
+                          const destLoc = availableLocations.find(
+                            (l) =>
+                              l.id ===
+                              (destinationOverrideId ||
+                                activeScenario.destinationId)
+                          );
+                          const needsLift =
+                            (origLoc?.floor ?? 0) !== (destLoc?.floor ?? 0);
+                          setShowBuildingCutaway(needsLift);
+                          sceneManagerRef.current?.setVisualLayers({
+                            showBuildingCutaway: needsLift,
+                          });
+                        }}
+                        className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
+                      >
+                        {availableLocations.map((loc) => (
+                          <option key={loc.id} value={loc.id}>
+                            {loc.name} [{loc.code} · {loc.floor ?? 0}F]
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* 5. Delivery Destination Selection */}
+                    <div className="min-w-0">
+                      <label className="block text-[11px] text-slate-400 mb-1 truncate">
+                        5. Destination
                       </label>
                       <select
                         value={
@@ -930,39 +1009,43 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
                         }
                         onChange={(e) => {
                           setActiveElevatorCaseId('');
-                          setOriginOverrideId('');
                           setElevatorFaultMode('none');
                           setDestinationOverrideId(e.target.value);
-                          const loc = DELIVERY_LOCATIONS.find(
+                          const destLoc = availableLocations.find(
                             (l) => l.id === e.target.value
                           );
+                          const origLoc = availableLocations.find(
+                            (l) =>
+                              l.id ===
+                              (originOverrideId || activeScenario.originId)
+                          );
                           const needsLift =
-                            (loc?.floor ?? 0) !==
-                            (activeScenario.originFloor ?? 0);
+                            (destLoc?.floor ?? 0) !==
+                            (origLoc?.floor ?? activeScenario.originFloor ?? 0);
                           setShowBuildingCutaway(needsLift);
                           sceneManagerRef.current?.setVisualLayers({
                             showBuildingCutaway: needsLift,
                           });
                         }}
-                        className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
+                        className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
                       >
-                        {DELIVERY_LOCATIONS.map((loc) => (
+                        {availableLocations.map((loc) => (
                           <option key={loc.id} value={loc.id}>
-                            {loc.name} [{loc.code} · Floor {loc.floor ?? 0}]
+                            {loc.name} [{loc.code} · {loc.floor ?? 0}F]
                           </option>
                         ))}
                       </select>
                     </div>
 
-                    {/* 4. Navigation Policy Selection */}
+                    {/* 6. Navigation Policy Selection */}
                     <div className="min-w-0">
                       <label className="block text-[11px] text-slate-400 mb-1 truncate">
-                        4. Navigation Policy
+                        6. Navigation Policy
                       </label>
                       <select
                         value={selectedPolicyId}
                         onChange={(e) => onChangePolicy(e.target.value)}
-                        className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
+                        className="w-full min-h-[34px] bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
                       >
                         {policies.map((pol) => (
                           <option key={pol.id} value={pol.id}>
@@ -1328,8 +1411,8 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
             </span>
           </div>
 
-          {/* Active Robot Hardware Profile Summary */}
-          <div className="bg-[#0d1426] border border-slate-800/90 rounded-lg p-2.5 space-y-1">
+          {/* Active Robot & Active Environment Summary */}
+          <div className="bg-[#0d1426] border border-slate-800/90 rounded-lg p-2.5 space-y-1.5">
             <div className="flex items-center justify-between text-[11px]">
               <span className="font-semibold text-slate-200 flex items-center gap-1.5">
                 <span
@@ -1352,17 +1435,30 @@ export const SimulationLabPage: React.FC<SimulationLabPageProps> = ({
                 {activeRobot.payloadCapacityKg} kg · {activeRobot.batteryCapacityWh} Wh
               </span>
             </div>
+            <div className="pt-1 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+              <span className="text-slate-400">Environment:</span>
+              <span className="font-mono text-emerald-400 truncate max-w-[180px]">
+                {activeEnvironment.name} (v{activeEnvironment.version})
+              </span>
+            </div>
           </div>
 
-          {/* 1. Delivery Progress (%) */}
+          {/* 1. Delivery Progress (%) & Battery Level (%) */}
           <div className="bg-[#0d1426] border border-slate-800/90 rounded-lg p-3 space-y-1.5">
             <div className="flex items-center justify-between text-xs">
               <span className="text-slate-400 font-medium">
                 Delivery Progress
               </span>
-              <span className="font-mono font-bold text-cyan-400 tabular-nums">
-                {deliveryProgressPct}%
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="font-mono font-bold text-cyan-400 tabular-nums">
+                  {deliveryProgressPct}%
+                </span>
+                <span className="text-slate-700">|</span>
+                <span className="flex items-center gap-1 font-mono text-emerald-400 tabular-nums">
+                  <BatteryCharging className="w-3.5 h-3.5" />
+                  <span>{telemetry.batteryLevelPct.toFixed(1)}%</span>
+                </span>
+              </div>
             </div>
             <div className="w-full h-2 bg-slate-900 rounded-full overflow-hidden">
               <div

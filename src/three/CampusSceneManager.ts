@@ -30,6 +30,7 @@ import {
 import {
   CameraPresetId,
   ElevatorFaultMode,
+  EnvironmentDefinition,
   LiveTelemetry,
   NavigationPolicyConfig,
   PedestrianDistributionConfig,
@@ -67,6 +68,8 @@ export class CampusSceneManager {
   private clock = new THREE.Clock();
 
   // Scene Groups
+  private staticEnvironmentGroup = new THREE.Group();
+  private activeEnvironment: EnvironmentDefinition | null = null;
   private robotGroup = new THREE.Group();
   private robotChassisMesh!: THREE.Mesh;
   private robotAccentMesh!: THREE.Mesh;
@@ -145,9 +148,11 @@ export class CampusSceneManager {
       onTelemetryUpdate: (telemetry: LiveTelemetry) => void;
       onLogEvent: (entry: SimulationLogEntry) => void;
       onSimulationComplete: (payload: SimulationCompletionPayload) => void;
-    }
+    },
+    initialEnvironment: EnvironmentDefinition | null = null
   ) {
     this.container = container;
+    this.activeEnvironment = initialEnvironment;
     this.onTelemetryUpdate = callbacks.onTelemetryUpdate;
     this.onLogEvent = callbacks.onLogEvent;
     this.onSimulationComplete = callbacks.onSimulationComplete;
@@ -218,13 +223,8 @@ export class CampusSceneManager {
 
     // 5. Build 3D Campus Environment & Autonomous Robot BEFORE initializing navigation controller
     this.setupLighting();
-    this.buildCampusGroundAndRoads();
-    this.buildCampusBuildings();
-    this.buildTreesAndBenches();
-    this.buildStreetlights();
-    this.buildDeliveryAndChargingStations();
-    this.buildElevatorTowers();
-    this.buildConstructionZones();
+    this.scene.add(this.staticEnvironmentGroup);
+    this.rebuildEnvironmentGeometry(initialEnvironment);
     this.buildAutonomousRobot();
     this.buildRobotCurrentCellMarker();
     this.buildNextWaypointMarker();
@@ -255,7 +255,8 @@ export class CampusSceneManager {
           this.emitTelemetry();
           this.onSimulationComplete(payload);
         },
-      }
+      },
+      initialEnvironment
     );
     if (initialPolicy.isCandidatePolicy) {
       this.navController.setCandidatePolicyState(loadCandidatePolicyState(), false);
@@ -342,7 +343,30 @@ export class CampusSceneManager {
     return tex;
   }
 
-  private buildCampusGroundAndRoads(): void {
+  public rebuildEnvironmentGeometry(env: EnvironmentDefinition | null): void {
+    this.activeEnvironment = env;
+    while (this.staticEnvironmentGroup.children.length > 0) {
+      this.staticEnvironmentGroup.remove(this.staticEnvironmentGroup.children[0]);
+    }
+    this.buildingShellMeshes.clear();
+    this.deliveryRingMeshes = [];
+    this.elevatorHandles.clear();
+    this.constructionGroups.clear();
+    this.interactiveMeshes = [];
+
+    const isCampus = !env || env.id === 'env-campus-main';
+    this.buildCampusGroundAndRoads(isCampus);
+    this.buildCampusBuildings();
+    if (isCampus) {
+      this.buildTreesAndBenches();
+      this.buildStreetlights();
+    }
+    this.buildDeliveryAndChargingStations();
+    this.buildElevatorTowers();
+    this.buildConstructionZones();
+  }
+
+  private buildCampusGroundAndRoads(isCampus = true): void {
     const terrainGeo = new THREE.PlaneGeometry(240, 240);
     const terrainMat = new THREE.MeshStandardMaterial({
       color: 0x09131c,
@@ -353,18 +377,21 @@ export class CampusSceneManager {
     terrainMesh.rotation.x = -Math.PI / 2;
     terrainMesh.position.y = -0.05;
     terrainMesh.receiveShadow = true;
-    this.scene.add(terrainMesh);
+    this.staticEnvironmentGroup.add(terrainMesh);
 
+    const floorColor = isCampus ? 0x112a24 : 0x0f172a;
     const grassMat = new THREE.MeshStandardMaterial({
-      color: 0x112a24,
+      color: floorColor,
       roughness: 0.88,
-      metalness: 0.05,
+      metalness: 0.08,
     });
-    const mainGrass = new THREE.Mesh(new THREE.PlaneGeometry(92, 92), grassMat);
+    const w = this.activeEnvironment?.widthM ?? 92;
+    const d = this.activeEnvironment?.depthM ?? 92;
+    const mainGrass = new THREE.Mesh(new THREE.PlaneGeometry(w, d), grassMat);
     mainGrass.rotation.x = -Math.PI / 2;
     mainGrass.position.y = 0.0;
     mainGrass.receiveShadow = true;
-    this.scene.add(mainGrass);
+    this.staticEnvironmentGroup.add(mainGrass);
 
     const roadMat = new THREE.MeshStandardMaterial({
       color: 0x1e293b,
@@ -378,12 +405,12 @@ export class CampusSceneManager {
     const ewRoad = new THREE.Mesh(new THREE.BoxGeometry(84, 0.06, 7.2), roadMat);
     ewRoad.position.set(0, 0.03, 0);
     ewRoad.receiveShadow = true;
-    this.scene.add(ewRoad);
+    this.staticEnvironmentGroup.add(ewRoad);
 
     const nsRoad = new THREE.Mesh(new THREE.BoxGeometry(7.2, 0.06, 84), roadMat);
     nsRoad.position.set(0, 0.03, 0);
     nsRoad.receiveShadow = true;
-    this.scene.add(nsRoad);
+    this.staticEnvironmentGroup.add(nsRoad);
 
     const dashMat = new THREE.MeshBasicMaterial({ color: 0x475569 });
     for (let i = -38; i <= 38; i += 4) {
@@ -391,12 +418,12 @@ export class CampusSceneManager {
       const ewDash = new THREE.Mesh(new THREE.PlaneGeometry(2.0, 0.18), dashMat);
       ewDash.rotation.x = -Math.PI / 2;
       ewDash.position.set(i, 0.068, 0);
-      this.scene.add(ewDash);
+      this.staticEnvironmentGroup.add(ewDash);
 
       const nsDash = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 2.0), dashMat);
       nsDash.rotation.x = -Math.PI / 2;
       nsDash.position.set(0, 0.068, i);
-      this.scene.add(nsDash);
+      this.staticEnvironmentGroup.add(nsDash);
     }
 
     const pathwayMat = new THREE.MeshStandardMaterial({
@@ -405,27 +432,47 @@ export class CampusSceneManager {
       metalness: 0.1,
     });
 
-    const pathways: [number, number, number, number][] = [
-      [0, -15, 58, 3.6],
-      [0, 15, 58, 3.6],
-      [-15, 0, 3.6, 48],
-      [15, 0, 3.6, 48],
-      [-14, -12, 4.5, 8],
-      [6, 19, 4.0, 9],
-    ];
+    if (isCampus) {
+      const pathways: [number, number, number, number][] = [
+        [0, -15, 58, 3.6],
+        [0, 15, 58, 3.6],
+        [-15, 0, 3.6, 48],
+        [15, 0, 3.6, 48],
+        [-14, -12, 4.5, 8],
+        [6, 19, 4.0, 9],
+      ];
 
-    for (const [px, pz, pw, pd] of pathways) {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(pw, 0.07, pd), pathwayMat);
-      mesh.position.set(px, 0.035, pz);
-      mesh.receiveShadow = true;
-      this.scene.add(mesh);
+      for (const [px, pz, pw, pd] of pathways) {
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(pw, 0.07, pd), pathwayMat);
+        mesh.position.set(px, 0.035, pz);
+        mesh.receiveShadow = true;
+        this.staticEnvironmentGroup.add(mesh);
+      }
+    } else if (this.activeEnvironment) {
+      // Render custom corridor elements on the floor
+      for (const el of this.activeEnvironment.elements) {
+        if (el.type === 'corridor' || el.type === 'door') {
+          const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(el.width, 0.07, el.depth),
+            pathwayMat
+          );
+          mesh.position.set(el.x, (el.floor || 0) * 3.6 + 0.035, el.z);
+          mesh.receiveShadow = true;
+          this.staticEnvironmentGroup.add(mesh);
+        }
+      }
     }
   }
 
   private buildCampusBuildings(): void {
-    for (const bldg of CAMPUS_BUILDINGS) {
+    const buildingsList =
+      this.activeEnvironment && this.activeEnvironment.id !== 'env-campus-main'
+        ? this.activeEnvironment.buildings
+        : CAMPUS_BUILDINGS;
+
+    for (const bldg of buildingsList) {
       const group = new THREE.Group();
-      group.position.set(bldg.position[0], 0, bldg.position[2]);
+      group.position.set(bldg.position[0], bldg.position[1] || 0, bldg.position[2]);
       group.userData = { buildingName: bldg.name, buildingId: bldg.id };
 
       const [w, h, d] = bldg.size;
@@ -437,10 +484,10 @@ export class CampusSceneManager {
         metalness: 0.15,
       });
       const plinth = new THREE.Mesh(
-        new THREE.BoxGeometry(w + 1.2, 0.6, d + 1.2),
+        new THREE.BoxGeometry(w + 0.8, 0.5, d + 0.8),
         plinthMat
       );
-      plinth.position.y = 0.3;
+      plinth.position.y = 0.25;
       plinth.castShadow = true;
       plinth.receiveShadow = true;
       group.add(plinth);
@@ -452,7 +499,7 @@ export class CampusSceneManager {
         metalness: 0.45,
       });
       const mainBody = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), bodyMat);
-      mainBody.position.y = 0.6 + h / 2;
+      mainBody.position.y = 0.5 + h / 2;
       mainBody.castShadow = true;
       mainBody.receiveShadow = true;
       mainBody.userData = { buildingName: bldg.name };
@@ -465,10 +512,10 @@ export class CampusSceneManager {
         metalness: 0.3,
       });
       const upperTier = new THREE.Mesh(
-        new THREE.BoxGeometry(w * 0.62, 2.2, d * 0.58),
+        new THREE.BoxGeometry(w * 0.62, 1.8, d * 0.58),
         roofTierMat
       );
-      upperTier.position.y = 0.6 + h + 1.1;
+      upperTier.position.y = 0.5 + h + 0.9;
       upperTier.castShadow = true;
       group.add(upperTier);
 
@@ -489,19 +536,10 @@ export class CampusSceneManager {
         new THREE.BoxGeometry(w + 0.3, 0.28, d + 0.3),
         accentMat
       );
-      accentBand.position.y = 0.6 + h - 0.3;
+      accentBand.position.y = 0.5 + h - 0.3;
       group.add(accentBand);
 
-      const signDir = bldg.position[2] < 0 ? 1 : -1;
-      const canopy = new THREE.Mesh(
-        new THREE.BoxGeometry(w * 0.38, 0.35, 2.2),
-        plinthMat
-      );
-      canopy.position.set(0, 3.2, signDir * (d / 2 + 0.9));
-      canopy.castShadow = true;
-      group.add(canopy);
-
-      this.scene.add(group);
+      this.staticEnvironmentGroup.add(group);
     }
   }
 
@@ -555,9 +593,9 @@ export class CampusSceneManager {
     canopyLowerInst.computeBoundingSphere();
     canopyUpperInst.computeBoundingSphere();
 
-    this.scene.add(trunkInstanced);
-    this.scene.add(canopyLowerInst);
-    this.scene.add(canopyUpperInst);
+    this.staticEnvironmentGroup.add(trunkInstanced);
+    this.staticEnvironmentGroup.add(canopyLowerInst);
+    this.staticEnvironmentGroup.add(canopyUpperInst);
 
     const woodMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.8 });
     const legMat = new THREE.MeshStandardMaterial({
@@ -587,7 +625,7 @@ export class CampusSceneManager {
       legR.position.set(0.75, 0.225, 0);
       benchGroup.add(legR);
 
-      this.scene.add(benchGroup);
+      this.staticEnvironmentGroup.add(benchGroup);
     }
   }
 
@@ -618,12 +656,17 @@ export class CampusSceneManager {
       bulb.position.set(0.68, 4.1, 0);
       group.add(bulb);
 
-      this.scene.add(group);
+      this.staticEnvironmentGroup.add(group);
     }
   }
 
   private buildDeliveryAndChargingStations(): void {
-    for (const loc of DELIVERY_LOCATIONS) {
+    const locationsList =
+      this.activeEnvironment && this.activeEnvironment.locations.length > 0
+        ? this.activeEnvironment.locations
+        : DELIVERY_LOCATIONS;
+
+    for (const loc of locationsList) {
       const group = new THREE.Group();
       group.position.set(loc.position[0], loc.position[1], loc.position[2]);
 
@@ -680,7 +723,7 @@ export class CampusSceneManager {
         group.add(roof);
       }
 
-      this.scene.add(group);
+      this.staticEnvironmentGroup.add(group);
     }
   }
 
@@ -734,9 +777,18 @@ export class CampusSceneManager {
       roughness: 0.2,
     });
 
-    for (const elev of CAMPUS_ELEVATORS) {
+    const elevatorsList =
+      this.activeEnvironment && this.activeEnvironment.id !== 'env-campus-main'
+        ? this.activeEnvironment.elevators
+        : CAMPUS_ELEVATORS;
+    const buildingsList =
+      this.activeEnvironment && this.activeEnvironment.id !== 'env-campus-main'
+        ? this.activeEnvironment.buildings
+        : CAMPUS_BUILDINGS;
+
+    for (const elev of elevatorsList) {
       const group = new THREE.Group();
-      const bldg = CAMPUS_BUILDINGS.find((b) => b.id === elev.buildingId);
+      const bldg = buildingsList.find((b) => b.id === elev.buildingId);
       const bldgX = bldg ? bldg.position[0] : elev.cabinPos.x;
       const bldgZ = bldg ? bldg.position[2] : elev.cabinPos.z;
       const bldgW = bldg ? bldg.size[0] : 14;
@@ -992,7 +1044,7 @@ export class CampusSceneManager {
         upperDoorR,
         beaconMat,
       });
-      this.scene.add(group);
+      this.staticEnvironmentGroup.add(group);
     }
   }
 
@@ -1022,9 +1074,14 @@ export class CampusSceneManager {
       polygonOffsetUnits: -2,
     });
 
-    for (const cz of CONSTRUCTION_ZONES) {
+    const zonesList =
+      this.activeEnvironment && this.activeEnvironment.id !== 'env-campus-main'
+        ? this.activeEnvironment.constructionZones
+        : CONSTRUCTION_ZONES;
+
+    for (const cz of zonesList) {
       const group = new THREE.Group();
-      group.position.set(cz.position[0], 0, cz.position[2]);
+      group.position.set(cz.position[0], cz.position[1] || 0, cz.position[2]);
 
       const [w, d] = cz.size;
       const isPartial = cz.severity === 'Partial Lane Closure';
@@ -1080,7 +1137,7 @@ export class CampusSceneManager {
       }
 
       this.constructionGroups.set(cz.id, group);
-      this.scene.add(group);
+      this.staticEnvironmentGroup.add(group);
     }
   }
 
@@ -1794,7 +1851,9 @@ export class CampusSceneManager {
     scenario: ScenarioConfig,
     policy: NavigationPolicyConfig,
     robotId: string,
-    destinationOverrideId: string | null = null
+    destinationOverrideId: string | null = null,
+    originOverrideId: string | null = null,
+    environment?: EnvironmentDefinition | null
   ): void {
     const allRobots = loadRobots();
     const bot =
@@ -1802,12 +1861,22 @@ export class CampusSceneManager {
       ROBOT_UNITS.find((r) => r.id === robotId) ??
       ROBOT_UNITS[0];
 
+    if (
+      environment !== undefined &&
+      (environment?.id !== this.activeEnvironment?.id ||
+        environment?.updatedAt !== this.activeEnvironment?.updatedAt)
+    ) {
+      this.rebuildEnvironmentGeometry(environment);
+    }
+
     this.navController.setRobotHardwareConfig(bot);
     this.navController.setConfiguration(
       scenario,
       policy,
       robotId,
-      destinationOverrideId
+      destinationOverrideId,
+      originOverrideId,
+      environment
     );
     this.buildAutonomousRobot(bot);
 
@@ -1985,8 +2054,11 @@ export class CampusSceneManager {
     );
     this.robotSensorCone.scale.set(coneScale, coneScale, 1);
 
+    const isCustomEnv =
+      this.activeEnvironment && this.activeEnvironment.id !== 'env-campus-main';
     for (const [czId, group] of this.constructionGroups.entries()) {
       group.visible =
+        Boolean(isCustomEnv) ||
         this.navController.currentScenario.activeConstructionZones.includes(czId);
     }
 

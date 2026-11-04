@@ -57,6 +57,8 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
   const {
     experiments,
     policies,
+    activeRobot,
+    activeEnvironment,
     candidatePolicyState,
     weaknessClusters,
     failureDrivenBatches,
@@ -64,6 +66,12 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
     recordExperimentsBatch,
     recordFailureDrivenBatch,
   } = useExperimentStore();
+
+  const availableLocations = useMemo(() => {
+    return activeEnvironment?.locations && activeEnvironment.locations.length > 0
+      ? activeEnvironment.locations
+      : DELIVERY_LOCATIONS;
+  }, [activeEnvironment]);
 
   const [activeTab, setActiveTab] = useState<GeneratorTabMode>('Failure-Driven');
   const [sourceFilter, setSourceFilter] = useState<
@@ -182,6 +190,7 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
         includeElevatorFaults: includeElevFaults,
         includeBatteryConstraints: includeBatConstraints,
         datasetSplitMode: 'balanced',
+        environment: activeEnvironment,
       },
       scenarios.length
     );
@@ -191,7 +200,7 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
     ]);
     setRandomBaseSeed((s) => s + randomCountToGen * 100);
     setCreatedBanner(
-      `Generated ${newBatch.length} geometrically validated Random Synthetic Scenarios (Seeds ${newBatch[0]?.randomSeed}–${newBatch[newBatch.length - 1]?.randomSeed}).`
+      `Generated ${newBatch.length} geometrically validated Random Synthetic Scenarios for ${activeEnvironment.name} (Seeds ${newBatch[0]?.randomSeed}–${newBatch[newBatch.length - 1]?.randomSeed}).`
     );
   };
 
@@ -200,7 +209,8 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
       experiments,
       scenarios,
       fdCountPerWeakness,
-      fdBaseSeed
+      fdBaseSeed,
+      activeEnvironment
     );
     addCustomScenariosBatch(batch.generatedScenarios);
     recordFailureDrivenBatch(batch);
@@ -209,7 +219,7 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
     ]);
     setFdBaseSeed((s) => s + 500);
     setCreatedBanner(
-      `Generated ${batch.generatedScenarios.length} Failure-Driven Targeted Scenarios addressing ${batch.weaknessesDiscovered.length} discovered policy weakness cluster(s).`
+      `Generated ${batch.generatedScenarios.length} Failure-Driven Targeted Scenarios for ${activeEnvironment.name} addressing ${batch.weaknessesDiscovered.length} discovered policy weakness cluster(s).`
     );
   };
 
@@ -226,7 +236,7 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
     );
     const cleanDesc =
       description.trim() ||
-      `Custom ${diff.toLowerCase()}-difficulty synthetic scenario (Seed ${customSeed}) with ${selectedZones.length} active construction zones, ${dynamicObstacles} pedestrians (${commuterCount}C/${randomCount}R/${crossingCount}X/${groupCount}G), and ${initialBatteryPct}% initial battery.`;
+      `Custom ${diff.toLowerCase()}-difficulty synthetic scenario (Seed ${customSeed}) in ${activeEnvironment.name} with ${selectedZones.length} active construction zones, ${dynamicObstacles} pedestrians (${commuterCount}C/${randomCount}R/${crossingCount}X/${groupCount}G), and ${initialBatteryPct}% initial battery.`;
 
     const newScenario: ScenarioConfig = {
       id: `scen-custom-${customSeed}-${Date.now().toString().slice(-4)}`,
@@ -266,12 +276,15 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
       generationReason: 'User-authored custom synthetic scenario.',
       recommendedPolicyId,
       isCustom: true,
+      environmentId: activeEnvironment.id,
+      environmentName: activeEnvironment.name,
+      environmentVersion: activeEnvironment.version,
     };
 
     onCreateScenario(newScenario);
     setSelectedBatchScenarioIds((prev) => [...new Set([...prev, newScenario.id])]);
     setCreatedBanner(
-      `Saved custom scenario "${newScenario.name}" (Seed ${customSeed}, ${diff} difficulty).`
+      `Saved custom scenario "${newScenario.name}" for ${activeEnvironment.name} (Seed ${customSeed}, ${diff} difficulty).`
     );
     setName('');
     setDescription('');
@@ -303,7 +316,8 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
     await runHeadlessBatchExperiments({
       scenarios: selectedScens,
       policy: chosenPol,
-      robotId: 'bot-rover-01',
+      robotId: activeRobot.id,
+      environment: activeEnvironment,
       episodesPerScenario,
       candidatePolicyState: chosenPol.isCandidatePolicy
         ? candidatePolicyState
@@ -327,12 +341,12 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
       {/* Top Header Banner */}
       <div className="bg-[#0d1322] border border-slate-800 rounded-xl p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div className="space-y-1 max-w-3xl">
-          <div className="text-xs font-medium text-cyan-400 flex items-center gap-2">
+          <div className="text-xs font-medium text-cyan-400 flex flex-wrap items-center gap-2">
             <span>SYNTHETIC SCENARIO FACTORY</span>
             <span>·</span>
-            <span>HEADLESS BATCH RUNNER</span>
+            <span>ACTIVE ENVIRONMENT: {activeEnvironment.name.toUpperCase()} (v{activeEnvironment.version})</span>
             <span>·</span>
-            <span>FAILURE-DRIVEN MUTATION</span>
+            <span>ACTIVE ROBOT: {activeRobot.name.toUpperCase()}</span>
           </div>
           <h2 className="font-display text-xl font-semibold text-slate-100">
             Synthetic Scenario Factory & Batch Policy Evaluation
@@ -340,8 +354,9 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
           <p className="text-sm text-slate-400">
             Generate deterministically seeded synthetic scenarios across 4 modes (
             <strong>Preset</strong>, <strong>Random</strong>, <strong>Custom</strong>, and{' '}
-            <strong>Failure-Driven</strong>) and evaluate policies at scale with the headless batch
-            simulation runner.
+            <strong>Failure-Driven</strong>) tailored to{' '}
+            <strong className="text-emerald-300">{activeEnvironment.name}</strong> and evaluate
+            policies at scale with the headless batch simulation runner.
           </p>
         </div>
 
@@ -718,7 +733,7 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
                       onChange={(e) => setOriginId(e.target.value)}
                       className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-100"
                     >
-                      {DELIVERY_LOCATIONS.map((loc) => (
+                      {availableLocations.map((loc) => (
                         <option key={loc.id} value={loc.id}>
                           {loc.name} ({loc.code})
                         </option>
@@ -734,7 +749,7 @@ export const ScenarioGeneratorPage: React.FC<ScenarioGeneratorPageProps> = ({
                       onChange={(e) => setDestinationId(e.target.value)}
                       className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-100"
                     >
-                      {DELIVERY_LOCATIONS.map((loc) => (
+                      {availableLocations.map((loc) => (
                         <option key={loc.id} value={loc.id}>
                           {loc.name} ({loc.code})
                         </option>

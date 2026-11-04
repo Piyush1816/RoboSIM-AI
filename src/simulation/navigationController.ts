@@ -10,10 +10,12 @@ import {
   AvoidanceHierarchyLevel,
   CampusElevatorConfig,
   CandidatePolicyState,
+  DeliveryLocation,
   ElevatorFaultMode,
   ElevatorMachineState,
   ElevatorState,
   ElevatorUnitStatus,
+  EnvironmentDefinition,
   FailureType,
   LiveTelemetry,
   NavigationPolicyConfig,
@@ -48,6 +50,7 @@ import {
   PerceptionProfile,
   PredictedGridPenaltyZone,
   ROBOT_COLLISION_RADIUS,
+  setActiveRuntimeEnvironment,
   stepDynamicPedestrians,
   worldToGridCoords,
 } from './pathfinding';
@@ -63,11 +66,15 @@ import { createSeededRng } from './scenarioFactory';
 
 export interface SimulationCompletionData {
   runSessionId: string;
+  environmentId?: string;
+  environmentName?: string;
+  environmentVersion?: string;
   scenarioId: string;
   scenarioName: string;
   scenarioSeed?: number;
   robotId: string;
   robotName: string;
+  robotConfigSnapshot?: RobotUnitConfig;
   policyId: string;
   policyName: string;
   policyVersion?: string;
@@ -165,9 +172,11 @@ export class AutonomousNavigationController {
   public activeRunSessionId = '';
   public completionEmittedForSession = false;
 
+  public currentEnvironment: EnvironmentDefinition | null = null;
   public currentScenario: ScenarioConfig;
   public currentPolicy: NavigationPolicyConfig;
   public currentRobotId: string;
+  public originOverrideId: string | null = null;
   public destinationOverrideId: string | null = null;
 
   /**
@@ -304,12 +313,14 @@ export class AutonomousNavigationController {
     scenario: ScenarioConfig,
     policy: NavigationPolicyConfig,
     robotId: string,
-    callbacks: NavigationControllerCallbacks = {}
+    callbacks: NavigationControllerCallbacks = {},
+    environment: EnvironmentDefinition | null = null
   ) {
     this.currentScenario = scenario;
     this.currentPolicy = policy;
     this.currentRobotId = robotId;
     this.callbacks = callbacks;
+    this.currentEnvironment = environment;
     this.reset(false, false);
   }
 
@@ -409,17 +420,52 @@ export class AutonomousNavigationController {
     this.activePayloadKg = payloadKg;
   }
 
-  public getOriginLocation() {
+  public setEnvironment(env: EnvironmentDefinition | null): void {
+    this.currentEnvironment = env;
+    setActiveRuntimeEnvironment(env);
+  }
+
+  public getActiveLocations(): DeliveryLocation[] {
+    if (
+      this.currentEnvironment &&
+      Array.isArray(this.currentEnvironment.locations) &&
+      this.currentEnvironment.locations.length > 0
+    ) {
+      return this.currentEnvironment.locations;
+    }
+    return DELIVERY_LOCATIONS;
+  }
+
+  public getActiveElevators(): CampusElevatorConfig[] {
+    if (
+      this.currentEnvironment &&
+      this.currentEnvironment.id !== 'env-campus-main'
+    ) {
+      return this.currentEnvironment.elevators ?? [];
+    }
+    return CAMPUS_ELEVATORS;
+  }
+
+  public getOriginLocation(): DeliveryLocation {
+    const locs = this.getActiveLocations();
+    const origId = this.originOverrideId || this.currentScenario.originId;
     return (
-      DELIVERY_LOCATIONS.find((l) => l.id === this.currentScenario.originId) ??
+      locs.find((l) => l.id === origId) ??
+      locs.find((l) => l.type === 'charging') ??
+      locs[0] ??
       DELIVERY_LOCATIONS[1]
     );
   }
 
-  public getTargetLocation() {
+  public getTargetLocation(): DeliveryLocation {
+    const locs = this.getActiveLocations();
     const destId = this.destinationOverrideId || this.currentScenario.destinationId;
+    const origin = this.getOriginLocation();
     return (
-      DELIVERY_LOCATIONS.find((l) => l.id === destId) ?? DELIVERY_LOCATIONS[5]
+      locs.find((l) => l.id === destId) ??
+      locs.find((l) => l.id !== origin.id && l.type === 'delivery') ??
+      locs[locs.length - 1] ??
+      DELIVERY_LOCATIONS[5]
     );
   }
 
@@ -432,9 +478,8 @@ export class AutonomousNavigationController {
 
   public getActiveElevatorConfig(): CampusElevatorConfig | null {
     if (!this.activeElevatorId) return null;
-    return (
-      CAMPUS_ELEVATORS.find((e) => e.id === this.activeElevatorId) ?? null
-    );
+    const elevs = this.getActiveElevators();
+    return elevs.find((e) => e.id === this.activeElevatorId) ?? null;
   }
 
   public getFloorLabel(floorNum: number): string {
@@ -498,11 +543,17 @@ export class AutonomousNavigationController {
     scenario: ScenarioConfig,
     policy: NavigationPolicyConfig,
     robotId: string,
-    destinationOverrideId: string | null = null
+    destinationOverrideId: string | null = null,
+    originOverrideId: string | null = null,
+    environment?: EnvironmentDefinition | null
   ): void {
+    if (environment !== undefined) {
+      this.setEnvironment(environment);
+    }
     this.currentScenario = scenario;
     this.currentPolicy = policy;
     this.currentRobotId = robotId;
+    this.originOverrideId = originOverrideId;
     this.destinationOverrideId = destinationOverrideId;
     this.pedestrianDistributionOverride = null;
     this.elevatorFaultModeOverride = null;
@@ -624,6 +675,9 @@ export class AutonomousNavigationController {
 
     return {
       simulationState: this.runState,
+      environmentId: this.currentEnvironment?.id ?? 'env-campus-main',
+      environmentName:
+        this.currentEnvironment?.name ?? 'University Innovation Campus (Multi-Floor)',
       robotId: bot.id,
       robotName: bot.name,
       robotStatus: this.robotOpState,
@@ -727,6 +781,7 @@ export class AutonomousNavigationController {
   }
 
   public reset(emitResetLog = true, notifyCallbacks = true): void {
+    setActiveRuntimeEnvironment(this.currentEnvironment);
     this.runState = 'idle';
     this.activeRunSessionId = '';
     this.completionEmittedForSession = false;
@@ -838,7 +893,9 @@ export class AutonomousNavigationController {
     this.robotAltitudeY = Number((this.originFloor * 3.6).toFixed(2));
     this.isRobotIndoor = Boolean(originLoc.isIndoor || this.originFloor > 0);
 
-    this.elevatorUnits = CAMPUS_ELEVATORS.map((cfg) => {
+    const activeElevatorsList = this.getActiveElevators();
+
+    this.elevatorUnits = activeElevatorsList.map((cfg) => {
       let initialState: ElevatorState = 'Available';
       let initialMachineState: ElevatorMachineState = 'IDLE';
       if (this.requiresElevator) {
@@ -910,23 +967,19 @@ export class AutonomousNavigationController {
     );
 
     if (this.requiresElevator && this.elevatorUnits.length > 0) {
-      // Determine initial elevator to approach:
-      // - If starting on an upper floor (originFloor > 0), use the elevator of the origin building.
-      // - If testing primary lift fault ('unavailable-before-arrival', 'delayed-reassess', 'no-alternative-available'), approach Primary Lift A first so fault detection & backup rerouting are exercised.
-      // - Otherwise use the target location's building elevator if specified, or Primary Lift A.
       let initialElevCfg =
-        CAMPUS_ELEVATORS.find((e) => e.isPrimary) ?? CAMPUS_ELEVATORS[0];
+        activeElevatorsList.find((e) => e.isPrimary) ?? activeElevatorsList[0];
 
       if (this.originFloor > 0 && originLoc.elevatorId) {
         initialElevCfg =
-          CAMPUS_ELEVATORS.find((e) => e.id === originLoc.elevatorId) ??
+          activeElevatorsList.find((e) => e.id === originLoc.elevatorId) ??
           initialElevCfg;
       } else if (
         this.elevatorFaultMode === 'none' &&
         targetLoc.elevatorId
       ) {
         initialElevCfg =
-          CAMPUS_ELEVATORS.find((e) => e.id === targetLoc.elevatorId) ??
+          activeElevatorsList.find((e) => e.id === targetLoc.elevatorId) ??
           initialElevCfg;
       }
 
@@ -939,17 +992,18 @@ export class AutonomousNavigationController {
       );
     } else if (
       this.originFloor === this.targetFloor &&
-      (originLoc.isIndoor || targetLoc.isIndoor)
+      (originLoc.isIndoor || targetLoc.isIndoor) &&
+      activeElevatorsList.length > 0
     ) {
       // Same-floor destination involving an indoor location: NEVER use the elevator!
       this.activeElevatorId = null;
       this.elevatorMissionPhase = 'not-required';
       const bldgElevCfg =
-        CAMPUS_ELEVATORS.find(
+        activeElevatorsList.find(
           (e) =>
             e.buildingId === originLoc.buildingId ||
             e.buildingId === targetLoc.buildingId
-        ) ?? CAMPUS_ELEVATORS[0];
+        ) ?? activeElevatorsList[0];
 
       if (this.originFloor > 0 || (originLoc.isIndoor && targetLoc.isIndoor)) {
         const sameFloorWps = buildIndoorElevatorRouteWaypoints(
@@ -3508,6 +3562,18 @@ export class AutonomousNavigationController {
 
     this.callbacks.onComplete?.({
       runSessionId: this.activeRunSessionId || `SESSION-${Date.now()}`,
+      environmentId:
+        this.currentEnvironment?.id ??
+        this.currentScenario.environmentId ??
+        'env-campus-main',
+      environmentName:
+        this.currentEnvironment?.name ??
+        this.currentScenario.environmentName ??
+        'University Innovation Campus (Multi-Floor)',
+      environmentVersion:
+        this.currentEnvironment?.version ??
+        this.currentScenario.environmentVersion ??
+        '2.4.0',
       scenarioId: this.currentScenario.id,
       scenarioName: this.currentScenario.name,
       scenarioSeed:
@@ -3515,6 +3581,7 @@ export class AutonomousNavigationController {
       robotId: bot.id,
       robotName: bot.name,
       robotHardwareSummary: formatRobotHardwareSummary(bot),
+      robotConfigSnapshot: { ...bot },
       payloadKg:
         this.activePayloadKg ??
         bot.defaultPayloadKg ??
