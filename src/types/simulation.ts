@@ -51,6 +51,7 @@ export interface PedestrianDistributionConfig {
   crossingCount: number;
   groupCount: number;
   randomSeed?: number;
+  crossingDenseMode?: boolean;
 }
 
 export type PredictionHorizonSec = 1 | 2 | 4;
@@ -431,10 +432,14 @@ export type FailureCategory =
 
 export interface CustomStaticObstacle {
   id: string;
-  name: string;
+  name?: string;
+  label?: string;
   x: number;
   z: number;
-  radius: number;
+  radius?: number;
+  width?: number;
+  depth?: number;
+  temporaryBlock?: boolean;
 }
 
 export interface ScenarioConfig {
@@ -660,6 +665,8 @@ export interface QLearningObservation {
   temporaryObstructionPresent: boolean;
   elevatorAvailable?: boolean;
   navigationState?: string;
+  consecutiveStops?: number;
+  consecutiveReplans?: number;
 }
 
 export interface QLearningHyperparameters {
@@ -669,6 +676,58 @@ export interface QLearningHyperparameters {
   initialExplorationRate: number;
   minExplorationRate: number;
   explorationDecay: number; // per-episode multiplier (e.g. 0.92)
+}
+
+export interface TrajectoryPointSample {
+  t: number;
+  timeSec?: number;
+  x: number;
+  z: number;
+  y?: number;
+  floor: number;
+  speedMps: number;
+  robotStatus: string;
+  actionTaken: string;
+  replanCount: number;
+  waitingTimeSec: number;
+  safetyInterventions: number;
+}
+
+export interface BeforeAfterRunSummary {
+  policyLabel: string;
+  policyVersion: string;
+  status: 'Success' | 'Failed';
+  durationSec: number;
+  distanceMeters: number;
+  collisions: number;
+  globalReplanCount: number;
+  unnecessaryReplanCount: number;
+  waitingTimeSec: number;
+  deadlockCount: number;
+  safetyInterventions: number;
+  episodeReward: number;
+  batteryConsumedPct: number;
+  failureCategory?: FailureCategory;
+  failureReason?: string;
+  decisionHistory: string[];
+  trajectory: TrajectoryPointSample[];
+}
+
+export interface BeforeAfterDemonstrationResult {
+  id: string;
+  timestamp: string;
+  scenarioId: string;
+  scenarioName: string;
+  scenarioSeed: number;
+  robotId: string;
+  robotName: string;
+  environmentId: string;
+  environmentName: string;
+  originPosition: { x: number; z: number; floor: number; label: string };
+  destinationPosition: { x: number; z: number; floor: number; label: string };
+  baselineRun: BeforeAfterRunSummary;
+  trainedCandidateRun: BeforeAfterRunSummary;
+  improvementSummary: string;
 }
 
 export interface TrainingEpisodeRecord {
@@ -682,6 +741,7 @@ export interface TrainingEpisodeRecord {
   status: 'Success' | 'Failed';
   totalReward: number;
   stepsCount: number;
+  qTableUpdatesCount?: number;
   durationSec: number;
   distanceMeters: number;
   collisions: number;
@@ -704,6 +764,7 @@ export interface CandidatePolicyTrainingMetricsSummary {
   meanReward: number;
   safetyInterventions: number;
   learnedStatesCount: number;
+  totalQTableUpdates?: number;
 }
 
 export interface CandidatePolicyState {
@@ -717,6 +778,7 @@ export interface CandidatePolicyState {
   trainedEnvironmentName?: string;
   isTrained: boolean;
   totalEpisodesTrained: number;
+  totalQTableUpdates?: number;
   createdAt?: string | null;
   lastTrainedAt: string | null;
   activatedAt?: string | null;
@@ -783,6 +845,7 @@ export interface BenchmarkAggregateMetrics {
   policyVersion: string;
   episodesCount: number;
   successRatePct: number;
+  navigationFailuresCount?: number;
   collisionRatePct: number;
   totalCollisions: number;
   avgCompletionTimeSec: number;
@@ -899,6 +962,8 @@ export interface ExperimentRecord {
   deadlockCount?: number;
   safetyInterventionCount?: number;
   episodeReward?: number;
+  qTableUpdatesCount?: number;
+  trajectorySamples?: TrajectoryPointSample[];
   decisionHistory?: string[];
   robotStateBeforeCompletion?: string;
   environmentalConditionsSummary?: string;

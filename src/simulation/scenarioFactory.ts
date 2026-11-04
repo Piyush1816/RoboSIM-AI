@@ -1,4 +1,5 @@
 import {
+  CAMPUS_ELEVATORS,
   CONSTRUCTION_ZONES,
   DELIVERY_LOCATIONS,
 } from '../data/campusConfig';
@@ -18,6 +19,7 @@ import { analyzeWeaknessesFromExperiments } from './failureIntelligence';
 import {
   classifyCampusSurface,
   computeAStarPathWithDiagnostics,
+  setActiveScenarioCustomObstacles,
 } from './pathfinding';
 
 /**
@@ -52,6 +54,8 @@ export function validateScenarioGeometry(
   scenario: ScenarioConfig,
   allowUnreachableIfIntended = false
 ): ScenarioValidationResult {
+  setActiveScenarioCustomObstacles(scenario.customObstacles);
+
   const origin =
     DELIVERY_LOCATIONS.find((l) => l.id === scenario.originId) ??
     DELIVERY_LOCATIONS[1];
@@ -59,14 +63,23 @@ export function validateScenarioGeometry(
     DELIVERY_LOCATIONS.find((l) => l.id === scenario.destinationId) ??
     DELIVERY_LOCATIONS[5];
 
-  const startPos = scenario.customStartCoords ?? {
-    x: origin.position[0],
-    z: origin.position[2],
+  const resolveOutdoorPos = (loc: typeof origin, customCoords?: { x: number; z: number }, isDest = false) => {
+    if (customCoords) return customCoords;
+    if (loc.isIndoor) {
+      let elev = CAMPUS_ELEVATORS.find((e) => e.id === loc.elevatorId || e.buildingId === loc.buildingId);
+      if (isDest && scenario.elevatorFaultMode === 'unavailable-before-arrival') {
+        const backup = CAMPUS_ELEVATORS.find((e) => !e.isPrimary);
+        if (backup) elev = backup;
+      }
+      if (elev) {
+        return { x: elev.outdoorApproachPos.x, z: elev.outdoorApproachPos.z };
+      }
+    }
+    return { x: loc.position[0], z: loc.position[2] };
   };
-  const destPos = scenario.customDestCoords ?? {
-    x: dest.position[0],
-    z: dest.position[2],
-  };
+
+  const startPos = resolveOutdoorPos(origin, scenario.customStartCoords, false);
+  const destPos = resolveOutdoorPos(dest, scenario.customDestCoords, true);
 
   const startSurface = classifyCampusSurface(startPos.x, startPos.z);
   const destSurface = classifyCampusSurface(destPos.x, destPos.z);

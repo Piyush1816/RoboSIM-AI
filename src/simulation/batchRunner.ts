@@ -5,6 +5,7 @@ import {
 } from '../data/campusConfig';
 import { loadRobots } from '../storage/experimentStorage';
 import {
+  BeforeAfterDemonstrationResult,
   BenchmarkAggregateMetrics,
   BenchmarkScenarioComparison,
   BenchmarkSuiteResult,
@@ -257,6 +258,8 @@ export function runSingleHeadlessEpisode(
     unnecessaryReplanCount: finalCompletion.unnecessaryReplanCount,
     deadlockCount: finalCompletion.deadlockCount,
     episodeReward: finalCompletion.episodeReward,
+    qTableUpdatesCount: finalCompletion.qTableUpdatesCount,
+    trajectorySamples: finalCompletion.trajectorySamples,
     decisionHistory: finalCompletion.decisionHistory,
     robotStateBeforeCompletion: finalCompletion.robotStateBeforeCompletion,
     environmentalConditionsSummary:
@@ -525,6 +528,7 @@ export async function executePolicyTrainingLoop(
       status: experimentRecord.status,
       totalReward: completionData.episodeReward,
       stepsCount: stepsExecuted,
+      qTableUpdatesCount: completionData.qTableUpdatesCount ?? 0,
       durationSec: experimentRecord.durationSec,
       distanceMeters: experimentRecord.distanceMeters,
       collisions: experimentRecord.collisions,
@@ -543,6 +547,32 @@ export async function executePolicyTrainingLoop(
     workingState.trainingHistory.push(trainingEp);
     newEpisodeRecords.push(trainingEp);
     newExperimentRecords.push(experimentRecord);
+
+    // Update summary metrics on workingState
+    const allHist = workingState.trainingHistory;
+    const succCount = allHist.filter((h) => h.status === 'Success').length;
+    const failCount = allHist.length - succCount;
+    const meanRew =
+      allHist.length > 0
+        ? allHist.reduce((s, h) => s + h.totalReward, 0) / allHist.length
+        : 0;
+    const totalSaf = allHist.reduce(
+      (s, h) => s + (h.safetyInterventionCount ?? 0),
+      0
+    );
+    workingState.trainingMetricsSummary = {
+      episodesCompleted: allHist.length,
+      successCount: succCount,
+      failureCount: failCount,
+      successRatePct:
+        allHist.length > 0
+          ? Number(((succCount / allHist.length) * 100).toFixed(1))
+          : 0,
+      meanReward: Number(meanRew.toFixed(1)),
+      safetyInterventions: totalSaf,
+      learnedStatesCount: Object.keys(workingState.qTable).length,
+      totalQTableUpdates: workingState.totalQTableUpdates ?? 0,
+    };
 
     onEpisodeTrained?.(
       trainingEp,
@@ -570,6 +600,7 @@ function computeAggregateBenchmarkMetrics(
 ): BenchmarkAggregateMetrics {
   const n = Math.max(1, records.length);
   const successes = records.filter((r) => r.status === 'Success').length;
+  const navigationFailuresCount = records.filter((r) => r.status === 'Failed').length;
   const runsWithCollision = records.filter((r) => r.collisions > 0).length;
   const totalCollisions = records.reduce((s, r) => s + r.collisions, 0);
   const avgTime = records.reduce((s, r) => s + r.durationSec, 0) / n;
@@ -605,6 +636,7 @@ function computeAggregateBenchmarkMetrics(
     policyVersion,
     episodesCount: records.length,
     successRatePct: Number(((successes / n) * 100).toFixed(1)),
+    navigationFailuresCount,
     collisionRatePct: Number(((runsWithCollision / n) * 100).toFixed(1)),
     totalCollisions,
     avgCompletionTimeSec: Number(avgTime.toFixed(1)),
@@ -617,6 +649,194 @@ function computeAggregateBenchmarkMetrics(
     avgReward: Number(avgReward.toFixed(1)),
     totalSafetyInterventions,
     elevatorFailuresCount,
+  };
+}
+
+/**
+ * Runs a synchronized Before vs. After Demonstration on a single challenging scenario:
+ * A. Original Baseline Policy (or Untrained Policy)
+ * B. Trained Candidate Policy (with frozen Q-table)
+ * Under identical robot configuration, starting position, destination, environment, and scenario seed.
+ */
+export function runBeforeAfterDemonstration(options: {
+  scenario: ScenarioConfig;
+  baselinePolicy: NavigationPolicyConfig;
+  candidatePolicyState: CandidatePolicyState;
+  robotId?: string;
+  environment?: EnvironmentDefinition;
+  seedOverride?: number;
+}): {
+  demonstration: BeforeAfterDemonstrationResult;
+  baselineExperiment: ExperimentRecord;
+  candidateExperiment: ExperimentRecord;
+} {
+  const {
+    scenario,
+    baselinePolicy,
+    candidatePolicyState,
+    robotId = 'bot-rover-01',
+    environment,
+    seedOverride,
+  } = options;
+
+  const seed =
+    seedOverride ??
+    scenario.randomSeed ??
+    scenario.pedestrianDistribution?.randomSeed ??
+    333;
+
+  // 1. Run A: Original Baseline Policy
+  const baseRun = runSingleHeadlessEpisode({
+    scenario,
+    policy: baselinePolicy,
+    robotId,
+    environment,
+    seedOverride: seed,
+    runType: 'Evaluation',
+    candidatePolicyState: null,
+    isTrainingEpisode: false,
+    useBaselineReactiveMode: true,
+  });
+
+  // 2. Run B: Trained Candidate Policy (strictly frozen Q-table: isTrainingEpisode = false)
+  const frozenState: CandidatePolicyState = JSON.parse(
+    JSON.stringify(candidatePolicyState)
+  );
+  const candidatePolicyConfig: NavigationPolicyConfig = {
+    id: 'pol-candidate-rl',
+    name: frozenState.name,
+    version: frozenState.version,
+    algorithm: 'Tabular Q-Learning + Safety Layer',
+    description: 'Frozen Tabular Q-Learning Policy with Hard Safety Layer',
+    safetyClearanceM: 1.75,
+    cruiseSpeedFactor: 0.88,
+    replanThresholdSec: 1.5,
+    constructionAvoidanceWeight: 2.8,
+    batteryReserveThresholdPct: 20,
+    isCandidatePolicy: true,
+  };
+
+  const candRun = runSingleHeadlessEpisode({
+    scenario,
+    policy: candidatePolicyConfig,
+    robotId,
+    environment,
+    seedOverride: seed,
+    runType: 'Evaluation',
+    candidatePolicyState: frozenState,
+    isTrainingEpisode: false,
+    useBaselineReactiveMode: false,
+  });
+
+  const bRec = baseRun.experimentRecord;
+  const cRec = candRun.experimentRecord;
+
+  const timeDelta = Number((bRec.durationSec - cRec.durationSec).toFixed(1));
+  const replanDelta =
+    (bRec.globalReplanCount ?? bRec.replanCount) -
+    (cRec.globalReplanCount ?? cRec.replanCount);
+  const waitDelta = Number(
+    ((bRec.totalWaitingTimeSec ?? 0) - (cRec.totalWaitingTimeSec ?? 0)).toFixed(1)
+  );
+  const safDelta =
+    (bRec.safetyInterventionCount ?? 0) - (cRec.safetyInterventionCount ?? 0);
+
+  let improvementSummary = '';
+  if (bRec.status === 'Failed' && cRec.status === 'Success') {
+    improvementSummary = `Closed-Loop Breakthrough: Baseline Policy failed (${
+      bRec.failureType ?? 'Navigation Failure'
+    } after ${bRec.durationSec}s, ${
+      bRec.globalReplanCount ?? bRec.replanCount
+    } replans, ${
+      bRec.totalWaitingTimeSec ?? 0
+    }s waiting), whereas the Trained Candidate Policy (${
+      frozenState.version
+    }) successfully completed delivery in ${cRec.durationSec}s with ${
+      cRec.globalReplanCount ?? cRec.replanCount
+    } global replans and ${cRec.totalWaitingTimeSec ?? 0}s waiting time.`;
+  } else if (bRec.status === 'Success' && cRec.status === 'Success') {
+    improvementSummary = `Both policies completed delivery, with Trained Candidate (${
+      frozenState.version
+    }) changing completion time by ${
+      timeDelta >= 0 ? `-${timeDelta}s faster` : `+${Math.abs(timeDelta)}s`
+    } (${bRec.durationSec}s → ${cRec.durationSec}s), reducing global replans by ${replanDelta} (${
+      bRec.globalReplanCount ?? bRec.replanCount
+    } → ${
+      cRec.globalReplanCount ?? cRec.replanCount
+    }), reducing waiting time by ${waitDelta}s, and reducing safety interventions by ${safDelta}.`;
+  } else if (bRec.status === 'Success' && cRec.status === 'Failed') {
+    improvementSummary = `Regression Detected: Baseline completed delivery in ${bRec.durationSec}s, whereas Candidate Policy (${frozenState.version}) failed (${cRec.failureType ?? 'Navigation Failure'}). Additional training episodes on this scenario family are recommended.`;
+  } else {
+    improvementSummary = `Both Baseline (${bRec.failureType}) and Candidate (${cRec.failureType}) halted safely without completing delivery. Additional training episodes or corridor clearance required.`;
+  }
+
+  const demonstration: BeforeAfterDemonstrationResult = {
+    id: `DEMO-CMP-${Date.now().toString().slice(-6)}`,
+    timestamp: bRec.timestamp,
+    scenarioId: scenario.id,
+    scenarioName: scenario.name,
+    scenarioSeed: seed,
+    robotId: bRec.robotId,
+    robotName: bRec.robotName,
+    environmentId: bRec.environmentId ?? 'env-campus-main',
+    environmentName: bRec.environmentName ?? 'University Innovation Campus',
+    originPosition: {
+      x: bRec.originCoordinates?.x ?? -15,
+      z: bRec.originCoordinates?.z ?? -20,
+      floor: bRec.originFloor ?? 0,
+      label: bRec.originName,
+    },
+    destinationPosition: {
+      x: bRec.destinationCoordinates?.x ?? 15,
+      z: bRec.destinationCoordinates?.z ?? 18,
+      floor: bRec.destinationFloor ?? 0,
+      label: bRec.destinationName,
+    },
+    baselineRun: {
+      policyLabel: baselinePolicy.name,
+      policyVersion: baselinePolicy.version,
+      status: bRec.status,
+      durationSec: bRec.durationSec,
+      distanceMeters: bRec.distanceMeters,
+      collisions: bRec.collisions,
+      globalReplanCount: bRec.globalReplanCount ?? bRec.replanCount,
+      unnecessaryReplanCount: bRec.unnecessaryReplanCount ?? 0,
+      waitingTimeSec: bRec.totalWaitingTimeSec ?? 0,
+      deadlockCount: bRec.deadlockCount ?? 0,
+      safetyInterventions: bRec.safetyInterventionCount ?? 0,
+      episodeReward: bRec.episodeReward ?? 0,
+      batteryConsumedPct: bRec.batteryConsumedPct,
+      failureCategory: bRec.failureCategory,
+      failureReason: bRec.failureReason,
+      decisionHistory: bRec.decisionHistory ?? [],
+      trajectory: bRec.trajectorySamples ?? [],
+    },
+    trainedCandidateRun: {
+      policyLabel: `${frozenState.name} (${frozenState.version})`,
+      policyVersion: frozenState.version,
+      status: cRec.status,
+      durationSec: cRec.durationSec,
+      distanceMeters: cRec.distanceMeters,
+      collisions: cRec.collisions,
+      globalReplanCount: cRec.globalReplanCount ?? cRec.replanCount,
+      unnecessaryReplanCount: cRec.unnecessaryReplanCount ?? 0,
+      waitingTimeSec: cRec.totalWaitingTimeSec ?? 0,
+      deadlockCount: cRec.deadlockCount ?? 0,
+      safetyInterventions: cRec.safetyInterventionCount ?? 0,
+      episodeReward: cRec.episodeReward ?? 0,
+      batteryConsumedPct: cRec.batteryConsumedPct,
+      failureCategory: cRec.failureCategory,
+      failureReason: cRec.failureReason,
+      decisionHistory: cRec.decisionHistory ?? [],
+      trajectory: cRec.trajectorySamples ?? [],
+    },
+    improvementSummary,
+  };
+
+  return {
+    demonstration,
+    baselineExperiment: bRec,
+    candidateExperiment: cRec,
   };
 }
 

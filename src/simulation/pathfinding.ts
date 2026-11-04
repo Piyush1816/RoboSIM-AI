@@ -8,6 +8,7 @@ import {
 } from '../data/campusConfig';
 import {
   CampusElevatorConfig,
+  CustomStaticObstacle,
   EnvironmentDefinition,
   PedestrianBehaviorClass,
   PedestrianDistributionConfig,
@@ -18,6 +19,7 @@ import {
 } from '../types/simulation';
 
 let activeRuntimeEnvironment: EnvironmentDefinition | null = null;
+let activeScenarioCustomObstacles: CustomStaticObstacle[] = [];
 
 export function setActiveRuntimeEnvironment(
   env: EnvironmentDefinition | null
@@ -27,6 +29,16 @@ export function setActiveRuntimeEnvironment(
 
 export function getActiveRuntimeEnvironment(): EnvironmentDefinition | null {
   return activeRuntimeEnvironment;
+}
+
+export function setActiveScenarioCustomObstacles(
+  obstacles?: CustomStaticObstacle[]
+): void {
+  activeScenarioCustomObstacles = Array.isArray(obstacles) ? obstacles : [];
+}
+
+export function getActiveScenarioCustomObstacles(): CustomStaticObstacle[] {
+  return activeScenarioCustomObstacles;
 }
 
 export function isCampusEnvironmentActive(): boolean {
@@ -276,6 +288,32 @@ export function getActiveConstructionObstacleBounds(
         maxX: cx + w / 2,
         minZ: czPos - d / 2,
         maxZ: czPos + d / 2,
+      });
+    }
+  }
+
+  for (const obs of activeScenarioCustomObstacles) {
+    const halfW = (obs.width || 0.9) / 2;
+    const halfD = (obs.depth || 0.9) / 2;
+    if (obs.temporaryBlock) {
+      restrictedBoxes.push({
+        id: obs.id,
+        name: obs.label || 'Corridor Obstacle',
+        type: 'Construction Barrier',
+        minX: obs.x - halfW,
+        maxX: obs.x + halfW,
+        minZ: obs.z - halfD,
+        maxZ: obs.z + halfD,
+      });
+    } else {
+      blockedBoxes.push({
+        id: obs.id,
+        name: obs.label || 'Corridor Barrier',
+        type: 'Construction Barrier',
+        minX: obs.x - halfW,
+        maxX: obs.x + halfW,
+        minZ: obs.z - halfD,
+        maxZ: obs.z + halfD,
       });
     }
   }
@@ -926,8 +964,23 @@ export function checkSweptRobotCollision(
       elevatorDoorOpen
     );
 
+    const customCollisionBoxes: CollisionAABB[] = activeScenarioCustomObstacles.map((obs) => {
+      const halfW = (obs.width || 0.9) / 2;
+      const halfD = (obs.depth || 0.9) / 2;
+      return {
+        id: obs.id,
+        name: obs.label || 'Corridor Obstacle',
+        type: 'Construction Barrier',
+        minX: obs.x - halfW,
+        maxX: obs.x + halfW,
+        minZ: obs.z - halfD,
+        maxZ: obs.z + halfD,
+      };
+    });
+
     const activeBoxes: CollisionAABB[] = [
       ...blockedBoxes,
+      ...customCollisionBoxes,
       ...staticBounds.boxes.filter(
         (b) => !indoorCtx.authorizedBuildingIds.has(b.id)
       ),
@@ -1325,6 +1378,7 @@ export function derivePedestrianDistribution(
         crossingCount: customDist.crossingCount,
         groupCount: customDist.groupCount,
         randomSeed: customDist.randomSeed ?? 101,
+        crossingDenseMode: customDist.crossingDenseMode ?? false,
       };
     }
   }
@@ -1341,6 +1395,7 @@ export function derivePedestrianDistribution(
     crossingCount,
     groupCount,
     randomSeed: 101 + c * 17,
+    crossingDenseMode: false,
   };
 }
 
@@ -1597,15 +1652,15 @@ export function stepDynamicPedestrians(
         rIdx = Math.max(0, Math.min(wps.length - 1, rIdx + dir));
         obs.routeIndex = rIdx;
       } else {
-        // Cooperative slight lateral offset when passing within 2.4m of robot
+        // Slight personal-space margin only at very close contact (< 1.05m) so robot policy must actively avoid
         let latX = 0;
         let latZ = 0;
-        if (distToRobot < 2.4) {
+        if (distToRobot < 1.05) {
           const perpX = -vz / dist;
           const perpZ = vx / dist;
           const sideSign = dxToRobot * perpX + dzToRobot * perpZ >= 0 ? 1 : -1;
-          latX = perpX * sideSign * 0.45;
-          latZ = perpZ * sideSign * 0.45;
+          latX = perpX * sideSign * 0.14;
+          latZ = perpZ * sideSign * 0.14;
         }
         candidateX += ((vx / dist) * speed + latX) * subDt;
         candidateZ += ((vz / dist) * speed + latZ) * subDt;
@@ -1647,15 +1702,14 @@ export function stepDynamicPedestrians(
             obs.pauseTimerSec = 0.35 + nextRand() * 0.45;
           }
         } else {
-          // Cooperative lateral step near robot
           let latX = 0;
           let latZ = 0;
-          if (distToRobot < 2.5) {
+          if (distToRobot < 1.05) {
             const perpX = -vz / dist;
             const perpZ = vx / dist;
             const sideSign = dxToRobot * perpX + dzToRobot * perpZ >= 0 ? 1 : -1;
-            latX = perpX * sideSign * 0.55;
-            latZ = perpZ * sideSign * 0.55;
+            latX = perpX * sideSign * 0.14;
+            latZ = perpZ * sideSign * 0.14;
           }
           candidateX += ((vx / dist) * speed + latX) * subDt;
           candidateZ += ((vz / dist) * speed + latZ) * subDt;
@@ -1720,13 +1774,13 @@ export function stepDynamicPedestrians(
       // 3. CROSSING PEDESTRIANS (and legacy oscillating test spots)
       const primaryOffset = Math.sin(obs.walkTime * 1.2 + obs.phase) * obs.amplitude;
       let targetLateral = 0;
-      if (distToRobot < 2.6) {
+      if (distToRobot < 1.05) {
         if (obs.axis === 'x') {
           const signZ = dzToRobot >= 0 ? 1 : -1;
-          targetLateral = signZ * 1.15;
+          targetLateral = signZ * 0.16;
         } else {
           const signX = dxToRobot >= 0 ? 1 : -1;
-          targetLateral = signX * 1.15;
+          targetLateral = signX * 0.16;
         }
       }
       const dampAlpha = Math.min(1, subDt * 4.0);
@@ -2428,6 +2482,75 @@ export function evaluateActivePathPedestrianHazard(
     }
   }
 
+  // Also evaluate scenario custom corridor obstacles along the active forward path
+  if (activeScenarioCustomObstacles.length > 0 && targetWp && stepLen > 0.01) {
+    for (const cObs of activeScenarioCustomObstacles) {
+      const obsRadius = Math.max(cObs.width || 0.9, cObs.depth || 0.9) * 0.5;
+      const rx = cObs.x - robotPos.x;
+      const rz = cObs.z - robotPos.z;
+      const centerDist = Math.hypot(rx, rz);
+      if (centerDist > visibilityRangeM) continue;
+      const dotFwd = rx * stepDirX + rz * stepDirZ;
+      if (dotFwd < -0.25) continue;
+
+      const combinedRadius = ROBOT_COLLISION_RADIUS + obsRadius;
+      const actualClearance = Math.max(0, centerDist - combinedRadius);
+      const segCheck = pointToSegmentDist(
+        cObs.x,
+        cObs.z,
+        robotPos.x,
+        robotPos.z,
+        targetWp.x,
+        targetWp.z
+      );
+
+      if (segCheck.dist <= combinedRadius + 0.18 && centerDist <= lookaheadHorizonM) {
+        pathObstructedAhead = true;
+        if (actualClearance < nearestActualDist) {
+          nearestActualDist = actualClearance;
+          nearestPerceivedDist = actualClearance;
+        }
+        if (actualClearance <= 0.45) {
+          imminentStopRequired = true;
+          speedScaleFactor = 0;
+        } else if (actualClearance <= effectiveSafetyClearanceM) {
+          speedScaleFactor = Math.min(
+            speedScaleFactor,
+            Math.max(0.25, actualClearance / Math.max(0.8, effectiveSafetyClearanceM))
+          );
+        }
+        if (!blockingPed) {
+          const syntheticObs: PedestrianSimAgent = {
+            id: cObs.id,
+            name: cObs.label || cObs.name || 'Corridor Obstacle',
+            behaviorClass: 'group',
+            basePos: { x: cObs.x, z: cObs.z },
+            currentPos: { x: cObs.x, z: cObs.z },
+            velocity: { x: 0, z: 0 },
+            headingRad: 0,
+            axis: 'x',
+            amplitude: 0,
+            speedFactor: 0,
+            cruiseSpeedMps: 0,
+            phase: 0,
+            walkTime: 0,
+            lateralOffset: 0,
+            radius: obsRadius,
+            isPerceived: true,
+            isStationary: true,
+            history: [{ x: cObs.x, z: cObs.z }],
+            observationsCount: 4,
+            learnedRoutePattern: true,
+            predictedTrajectory: [{ x: cObs.x, z: cObs.z }],
+            predictionUncertaintyM: 0.05,
+          };
+          blockingPed = syntheticObs;
+          if (!nearestPed) nearestPed = syntheticObs;
+        }
+      }
+    }
+  }
+
   return {
     nearestActualDist: nearestActualDist < Infinity ? nearestActualDist : null,
     nearestPerceivedDist:
@@ -2459,103 +2582,110 @@ export function computeLocalBypassWaypoints(
 ): { splicedWaypoints: Vector2D[]; resumeIdx: number } | null {
   if (currentWaypointIdx >= waypoints.length) return null;
 
-  // Find a rejoin waypoint 3.0m to 6.5m ahead along the existing global A* route
-  let rejoinIdx = currentWaypointIdx;
-  let accum = 0;
-  let prev = robotPos;
-  for (let i = currentWaypointIdx; i < waypoints.length; i++) {
-    accum += Math.hypot(waypoints[i].x - prev.x, waypoints[i].z - prev.z);
-    prev = waypoints[i];
-    rejoinIdx = i;
-    if (accum >= 3.8) break;
-  }
-
-  const rejoinWp = waypoints[rejoinIdx];
-  const segDx = rejoinWp.x - robotPos.x;
-  const segDz = rejoinWp.z - robotPos.z;
-  const segLen = Math.hypot(segDx, segDz);
-  if (segLen < 1.2) return null;
-
-  const dirX = segDx / segLen;
-  const dirZ = segDz / segLen;
-  const perpX = -dirZ;
-  const perpZ = dirX;
-
   const pedCircles: CollisionCircle[] = allPedestrians.map((o) => ({
     id: o.id,
     name: o.name,
     type: 'Dynamic Pedestrian',
     x: o.currentPos.x,
     z: o.currentPos.z,
-    radius: o.radius + 0.18,
+    radius: o.radius + 0.16,
   }));
 
-  // Candidate lateral offsets (prefer side further from blocking pedestrian)
-  const pedRelX = blockingPed.currentPos.x - robotPos.x;
-  const pedRelZ = blockingPed.currentPos.z - robotPos.z;
-  const pedLatProj = pedRelX * perpX + pedRelZ * perpZ;
-  const preferredSign = pedLatProj >= 0 ? -1 : 1;
+  const lookaheadTargets = [2.4, 3.6, 5.0];
 
-  const candidateOffsets = [
-    preferredSign * 1.65,
-    -preferredSign * 1.65,
-    preferredSign * 2.1,
-    -preferredSign * 2.1,
-    preferredSign * 2.55,
-    -preferredSign * 2.55,
-  ];
+  for (const targetLookaheadM of lookaheadTargets) {
+    let rejoinIdx = currentWaypointIdx;
+    let accum = 0;
+    let prev = robotPos;
+    for (let i = currentWaypointIdx; i < waypoints.length; i++) {
+      accum += Math.hypot(waypoints[i].x - prev.x, waypoints[i].z - prev.z);
+      prev = waypoints[i];
+      rejoinIdx = i;
+      if (accum >= targetLookaheadM) break;
+    }
 
-  for (const latOffset of candidateOffsets) {
-    const wp1: Vector2D = {
-      x: Number((robotPos.x + dirX * Math.min(0.55, segLen * 0.18) + perpX * latOffset).toFixed(2)),
-      z: Number((robotPos.z + dirZ * Math.min(0.55, segLen * 0.18) + perpZ * latOffset).toFixed(2)),
-      y: robotPos.y ?? 0,
-      floor: robotPos.floor ?? 0,
-    };
-    const wp2: Vector2D = {
-      x: Number((robotPos.x + dirX * Math.min(3.0, segLen * 0.72) + perpX * latOffset).toFixed(2)),
-      z: Number((robotPos.z + dirZ * Math.min(3.0, segLen * 0.72) + perpZ * latOffset).toFixed(2)),
-      y: robotPos.y ?? 0,
-      floor: robotPos.floor ?? 0,
-    };
+    const rejoinWp = waypoints[rejoinIdx];
+    const segDx = rejoinWp.x - robotPos.x;
+    const segDz = rejoinWp.z - robotPos.z;
+    const segLen = Math.hypot(segDx, segDz);
+    if (segLen < 1.0) continue;
 
-    const { isRoadOrPath: r1 } = classifyCampusSurface(wp1.x, wp1.z);
-    const { isRoadOrPath: r2 } = classifyCampusSurface(wp2.x, wp2.z);
-    if (!r1 || !r2) continue;
+    const dirX = segDx / segLen;
+    const dirZ = segDz / segLen;
+    const perpX = -dirZ;
+    const perpZ = dirX;
 
-    const hit1 = checkSweptRobotCollision(
-      robotPos,
-      wp1,
-      ROBOT_COLLISION_RADIUS,
-      activeConstructionIds,
-      pedCircles
-    );
-    if (hit1 && hit1.collided) continue;
+    // Candidate lateral offsets (prefer side further from blocking pedestrian)
+    const pedRelX = blockingPed.currentPos.x - robotPos.x;
+    const pedRelZ = blockingPed.currentPos.z - robotPos.z;
+    const pedLatProj = pedRelX * perpX + pedRelZ * perpZ;
+    const preferredSign = pedLatProj >= 0 ? -1 : 1;
 
-    const hit2 = checkSweptRobotCollision(
-      wp1,
-      wp2,
-      ROBOT_COLLISION_RADIUS,
-      activeConstructionIds,
-      pedCircles
-    );
-    if (hit2 && hit2.collided) continue;
+    const candidateOffsets = [
+      preferredSign * 1.18,
+      -preferredSign * 1.18,
+      preferredSign * 1.42,
+      -preferredSign * 1.42,
+      preferredSign * 1.72,
+      -preferredSign * 1.72,
+      preferredSign * 2.15,
+      -preferredSign * 2.15,
+      preferredSign * 2.6,
+      -preferredSign * 2.6,
+    ];
 
-    const hit3 = checkSweptRobotCollision(
-      wp2,
-      rejoinWp,
-      ROBOT_COLLISION_RADIUS,
-      activeConstructionIds,
-      pedCircles
-    );
-    if (hit3 && hit3.collided) continue;
+    for (const latOffset of candidateOffsets) {
+      const wp1: Vector2D = {
+        x: Number((robotPos.x + dirX * Math.min(0.55, segLen * 0.2) + perpX * latOffset).toFixed(2)),
+        z: Number((robotPos.z + dirZ * Math.min(0.55, segLen * 0.2) + perpZ * latOffset).toFixed(2)),
+        y: robotPos.y ?? 0,
+        floor: robotPos.floor ?? 0,
+      };
+      const wp2: Vector2D = {
+        x: Number((robotPos.x + dirX * Math.min(2.8, segLen * 0.72) + perpX * latOffset).toFixed(2)),
+        z: Number((robotPos.z + dirZ * Math.min(2.8, segLen * 0.72) + perpZ * latOffset).toFixed(2)),
+        y: robotPos.y ?? 0,
+        floor: robotPos.floor ?? 0,
+      };
 
-    const prefix = waypoints.slice(0, currentWaypointIdx);
-    const suffix = waypoints.slice(rejoinIdx);
-    return {
-      splicedWaypoints: [{ ...robotPos }, ...prefix.slice(1), wp1, wp2, ...suffix],
-      resumeIdx: Math.max(1, prefix.length),
-    };
+      const { isRoadOrPath: r1 } = classifyCampusSurface(wp1.x, wp1.z);
+      const { isRoadOrPath: r2 } = classifyCampusSurface(wp2.x, wp2.z);
+      if (!r1 || !r2) continue;
+
+      const hit1 = checkSweptRobotCollision(
+        robotPos,
+        wp1,
+        ROBOT_COLLISION_RADIUS,
+        activeConstructionIds,
+        pedCircles
+      );
+      if (hit1 && hit1.collided) continue;
+
+      const hit2 = checkSweptRobotCollision(
+        wp1,
+        wp2,
+        ROBOT_COLLISION_RADIUS,
+        activeConstructionIds,
+        pedCircles
+      );
+      if (hit2 && hit2.collided) continue;
+
+      const hit3 = checkSweptRobotCollision(
+        wp2,
+        rejoinWp,
+        ROBOT_COLLISION_RADIUS,
+        activeConstructionIds,
+        pedCircles
+      );
+      if (hit3 && hit3.collided) continue;
+
+      const prefix = waypoints.slice(0, currentWaypointIdx);
+      const suffix = waypoints.slice(rejoinIdx);
+      return {
+        splicedWaypoints: [{ ...robotPos }, ...prefix.slice(1), wp1, wp2, ...suffix],
+        resumeIdx: Math.max(1, prefix.length),
+      };
+    }
   }
 
   return null;

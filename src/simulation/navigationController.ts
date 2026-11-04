@@ -28,9 +28,10 @@ import {
   RobotOperationalState,
   RobotUnitConfig,
   ScenarioConfig,
-  SimulationLogEntry,
+   SimulationLogEntry,
   SimulationRunState,
   StartPositionValidationResult,
+  TrajectoryPointSample,
   Vector2D,
 } from '../types/simulation';
 import {
@@ -53,6 +54,7 @@ import {
   PredictedGridPenaltyZone,
   ROBOT_COLLISION_RADIUS,
   setActiveRuntimeEnvironment,
+  setActiveScenarioCustomObstacles,
   stepDynamicPedestrians,
   worldToGridCoords,
 } from './pathfinding';
@@ -98,6 +100,8 @@ export interface SimulationCompletionData {
   deadlockCount: number;
   safetyInterventionCount?: number;
   episodeReward: number;
+  qTableUpdatesCount?: number;
+  trajectorySamples?: TrajectoryPointSample[];
   decisionHistory: string[];
   robotStateBeforeCompletion: string;
   environmentalConditionsSummary: string;
@@ -249,6 +253,8 @@ export class AutonomousNavigationController {
   public closestApproachDistanceM: number | null = null;
   public estimatedTtcSec: number | null = null;
   private inSpeedReductionEpisode = false;
+  private inSafetyInterventionEpisode = false;
+  private safetyInterventionCooldownSec = 0;
   private activeConflictHadStopOrReplan = false;
   private activeConflictPedId: string | null = null;
   private localBypassCooldownSec = 0;
@@ -303,6 +309,11 @@ export class AutonomousNavigationController {
   public unnecessaryReplanCount = 0;
   public deadlockCount = 0;
   public episodeReward = 0;
+  public qTableUpdatesCount = 0;
+  public consecutiveStopsCount = 0;
+  public consecutiveReplansCount = 0;
+  public trajectorySamples: TrajectoryPointSample[] = [];
+  private lastTrajectorySampleTimeSec = -1;
   public decisionHistory: string[] = [];
   public episodeActionCounts: Record<QLearningAction, number> = {
     MAINTAIN_SPEED: 0,
@@ -634,6 +645,7 @@ export class AutonomousNavigationController {
     candidateFloor = 0
   ): StartPositionValidationResult {
     setActiveRuntimeEnvironment(this.currentEnvironment);
+    setActiveScenarioCustomObstacles(this.currentScenario.customObstacles);
     const floorY = Number((candidateFloor * 3.6).toFixed(2));
     const basePos = {
       x: Number(candidateX.toFixed(2)),
@@ -1147,6 +1159,7 @@ export class AutonomousNavigationController {
 
   public reset(emitResetLog = true, notifyCallbacks = true): void {
     setActiveRuntimeEnvironment(this.currentEnvironment);
+    setActiveScenarioCustomObstacles(this.currentScenario.customObstacles);
     this.runState = 'idle';
     this.activeRunSessionId = '';
     this.completionEmittedForSession = false;
@@ -1157,6 +1170,8 @@ export class AutonomousNavigationController {
     this.collisionsCount = 0;
     this.replanCount = 0;
     this.safetyInterventionCount = 0;
+    this.inSafetyInterventionEpisode = false;
+    this.safetyInterventionCooldownSec = 0;
     this.pedestrianDetectionsCount = 0;
     this.totalWaitingTimeSec = 0;
     this.initialBatteryPct = this.currentScenario.initialBatteryPct ?? 98.0;
@@ -1174,6 +1189,11 @@ export class AutonomousNavigationController {
     this.unnecessaryReplanCount = 0;
     this.deadlockCount = 0;
     this.episodeReward = 0;
+    this.qTableUpdatesCount = 0;
+    this.consecutiveStopsCount = 0;
+    this.consecutiveReplansCount = 0;
+    this.trajectorySamples = [];
+    this.lastTrajectorySampleTimeSec = -1;
     this.decisionHistory = [];
     this.episodeActionCounts = {
       MAINTAIN_SPEED: 0,
@@ -1826,6 +1846,13 @@ export class AutonomousNavigationController {
       this.globalReplanCount += 1;
       this.pedestrianReplanCount += 1;
       this.activeConflictHadStopOrReplan = true;
+      // Global A* trajectory handoff incurs realistic onboard re-indexing deceleration & compute overhead
+      this.currentSpeedMps *= 0.35;
+      this.totalWaitingTimeSec += 0.35;
+      this.batteryPct = Math.max(
+        0,
+        this.batteryPct - 0.32 * this.currentScenario.batteryDrainMultiplier
+      );
       // Replanning hysteresis: prevent repeated route switching
       this.replanCooldownSec = this.useLegacyAvoidance ? 1.45 : 3.2;
       this.deadlockWaitTimerSec = 0;
@@ -2617,6 +2644,12 @@ export class AutonomousNavigationController {
     if (this.localBypassCooldownSec > 0) {
       this.localBypassCooldownSec = Math.max(0, this.localBypassCooldownSec - subDt);
     }
+    if (this.safetyInterventionCooldownSec > 0) {
+      this.safetyInterventionCooldownSec = Math.max(
+        0,
+        this.safetyInterventionCooldownSec - subDt
+      );
+    }
 
     this.evaluatePerception(this.elapsedTimeSec);
 
@@ -2703,7 +2736,7 @@ export class AutonomousNavigationController {
       }
     }
 
-    const hazard = !this.isRobotIndoor
+    let hazard = !this.isRobotIndoor
       ? evaluateActivePathPedestrianHazard(
           this.robotPos,
           this.waypoints,
@@ -2774,6 +2807,12 @@ export class AutonomousNavigationController {
         }
       }
     }
+    for (const cObs of this.currentScenario.customObstacles ?? []) {
+      const d = Math.hypot(cObs.x - this.robotPos.x, cObs.z - this.robotPos.z);
+      if (nearestStaticObsDist === null || d < nearestStaticObsDist) {
+        nearestStaticObsDist = d;
+      }
+    }
 
     const conflictPedSpeed = conflictPed
       ? Math.hypot(conflictPed.velocity.x, conflictPed.velocity.z)
@@ -2814,10 +2853,12 @@ export class AutonomousNavigationController {
       temporaryObstructionPresent,
       elevatorAvailable,
       navigationState: this.robotOpState,
+      consecutiveStops: this.consecutiveStopsCount,
+      consecutiveReplans: this.consecutiveReplansCount,
     };
 
     if (this.useLegacyAvoidance) {
-      // Legacy eager-replan behavior
+      // Baseline Reactive A* Controller (Speed Regulation + Safety Stop + Global A* Replanning)
       if (predictive.conflicts.length > 0 && predictive.primaryConflictPed) {
         desiredSpeed *= predictive.recommendedSpeedScale;
         if (this.replanCooldownSec <= 0) {
@@ -2828,29 +2869,100 @@ export class AutonomousNavigationController {
             true
           );
           this.episodeActionCounts.GLOBAL_REPLAN += 1;
+          if (this.decisionHistory.length < 25) {
+            this.decisionHistory.push(
+              `[t=${this.elapsedTimeSec.toFixed(1)}s] Baseline Proactive Global A* Replan (${predictive.primaryConflictPed.name})`
+            );
+          }
         }
       }
       if (hazard.pathObstructedAhead && hazard.blockingPed) {
         this.pedestrianYieldTimerSec += subDt;
         if (hazard.imminentStopRequired) {
+          if (this.safetyInterventionCooldownSec <= 0) {
+            this.safetyInterventionCount += 1;
+            this.safetyInterventionCooldownSec = 2.0;
+          }
           desiredSpeed = 0;
           this.currentSpeedMps = 0;
           this.totalWaitingTimeSec += subDt;
           this.pedestrianWaitingTimeSec += subDt;
           this.episodeActionCounts.STOP_TEMPORARILY += 1;
+          this.episodeReward -= 0.85;
         } else {
           desiredSpeed *= hazard.speedScaleFactor;
           this.episodeActionCounts.REDUCE_SPEED += 1;
         }
         if (this.replanCooldownSec <= 0) {
           if (temporaryObstructionPresent) this.unnecessaryReplanCount += 1;
-          this.attemptDynamicReplanAroundPedestrians(
+          const replanOk = this.attemptDynamicReplanAroundPedestrians(
             hazard.blockingPed.name,
             predictive.penaltyZones,
             false
           );
           this.episodeActionCounts.GLOBAL_REPLAN += 1;
+          this.episodeReward -= 2.4;
+          if (!replanOk) {
+            this.deadlockRetryCount += 1;
+          }
         }
+        // If baseline reactive policy remains stalled at a corridor blockage or multi-obstacle bottleneck beyond maxDeadlockWaitSec, record genuine Pathway Deadlock
+        if (this.pedestrianYieldTimerSec >= this.maxDeadlockWaitSec) {
+          this.deadlockCount += 1;
+          const reason = `Pathway Deadlock: Baseline reactive policy stalled behind ${
+            hazard.blockingPed.name
+          } for ${this.pedestrianYieldTimerSec.toFixed(
+            1
+          )}s after ${this.globalReplanCount} global replans (${this.totalWaitingTimeSec.toFixed(
+            1
+          )}s total wait).`;
+          this.runState = 'failed';
+          this.currentSpeedMps = 0;
+          this.robotOpState = 'Emergency Stop';
+          this.navStatusText = reason;
+          this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
+          this.callbacks.onLogEvent?.('error', reason);
+          this.emitCompletion({
+            status: 'Failed',
+            durationSec: Number(this.elapsedTimeSec.toFixed(1)),
+            distanceMeters: Number(this.distanceTraveledM.toFixed(1)),
+            collisions: this.collisionsCount,
+            replanCount: this.replanCount,
+            pedestrianDetectionsCount: this.pedestrianDetectionsCount,
+            predictedEncountersCount: this.predictedEncountersCount,
+            avoidedEncountersCount: this.avoidedEncountersCount,
+            unnecessaryStopsCount: this.unnecessaryStopsCount,
+            predictionAccuracyPct: Number(this.predictionAccuracyPct.toFixed(1)),
+            pedestrianReplanCount: this.pedestrianReplanCount,
+            speedReductionEventsCount: this.speedReductionEventsCount,
+            reducedSpeedTimeSec: Number(this.reducedSpeedTimeSec.toFixed(1)),
+            pedestrianWaitingTimeSec: Number(this.pedestrianWaitingTimeSec.toFixed(1)),
+            speedBasedAvoidanceCount: this.speedBasedAvoidanceCount,
+            localBypassCount: this.localBypassCount,
+            globalReplanCount: this.globalReplanCount,
+            totalWaitingTimeSec: Number(this.totalWaitingTimeSec.toFixed(1)),
+            elevatorWaitTimeSec: Number(this.elevatorWaitTimeSec.toFixed(1)),
+            batteryConsumedPct: Number(
+              (this.initialBatteryPct - this.batteryPct).toFixed(1)
+            ),
+            failureType: 'Pathway Deadlock',
+            obstacleType: 'Dynamic Pedestrian',
+            failureReason: reason,
+            rootCause: reason,
+            mitigationSuggested:
+              'Train Candidate Q-Learning Policy to execute continuous-space LOCAL_AVOIDANCE bypasses and proactive speed regulation instead of repeated global A* replanning.',
+            failureCoordinates: {
+              x: Number(this.robotPos.x.toFixed(1)),
+              z: Number(this.robotPos.z.toFixed(1)),
+            },
+          });
+          return;
+        }
+      } else {
+        this.pedestrianYieldTimerSec = Math.max(
+          0,
+          this.pedestrianYieldTimerSec - subDt * 0.45
+        );
       }
     } else if (!this.isRobotIndoor && isUsingCandidatePolicy && this.candidatePolicyState) {
       // ==========================================================================
@@ -2860,7 +2972,8 @@ export class AutonomousNavigationController {
       const hasConflictOrHazard =
         predictive.conflicts.length > 0 ||
         hazard.pathObstructedAhead ||
-        hazard.speedScaleFactor < 0.96;
+        hazard.speedScaleFactor < 0.96 ||
+        (nearestStaticObsDist !== null && nearestStaticObsDist <= 3.6);
 
       // Trigger RL decision step every 0.40s or immediately when a hazard appears
       if (this.rlDecisionTimerSec >= 0.4 || (hasConflictOrHazard && !this.lastRlAction)) {
@@ -2875,8 +2988,9 @@ export class AutonomousNavigationController {
           const safetyOverrideOccurred = Boolean(
             hazard.imminentStopRequired && this.lastRlAction === 'MAINTAIN_SPEED'
           );
-          if (safetyOverrideOccurred) {
+          if (safetyOverrideOccurred && this.safetyInterventionCooldownSec <= 0) {
             this.safetyInterventionCount += 1;
+            this.safetyInterventionCooldownSec = 2.0;
           }
           const stepReward = computeStepReward(this.lastRlObs, this.lastRlAction, {
             progressMeters: progressM,
@@ -2884,12 +2998,15 @@ export class AutonomousNavigationController {
             safetyOverrideTriggered: safetyOverrideOccurred,
             unnecessaryReplanTriggered: Boolean(
               this.lastRlAction === 'GLOBAL_REPLAN' &&
-                this.lastRlObs.temporaryObstructionPresent
+                (this.lastRlObs.temporaryObstructionPresent ||
+                  (this.lastRlObs.consecutiveReplans ?? 0) >= 1)
             ),
-            localBypassSucceeded: this.lastRlAction === 'LOCAL_AVOIDANCE',
+            localBypassSucceeded:
+              this.lastRlAction === 'LOCAL_AVOIDANCE' && progressM > 0.15,
             speedRegulatedSmoothly:
               this.lastRlAction === 'REDUCE_SPEED' &&
-              this.lastRlObs.temporaryObstructionPresent,
+              this.lastRlObs.temporaryObstructionPresent &&
+              progressM > 0.1,
           });
           this.episodeReward += stepReward;
 
@@ -2902,11 +3019,16 @@ export class AutonomousNavigationController {
               nextStateKey,
               false
             );
+            this.qTableUpdatesCount += 1;
           } else {
             this.candidatePolicyState.stateVisitCounts[this.lastRlStateKey] =
               (this.candidatePolicyState.stateVisitCounts[this.lastRlStateKey] ?? 0) + 1;
             this.candidatePolicyState.actionDistribution[this.lastRlAction] =
               (this.candidatePolicyState.actionDistribution[this.lastRlAction] ?? 0) + 1;
+          }
+
+          if (progressM > 0.35) {
+            this.consecutiveStopsCount = 0;
           }
         }
 
@@ -2916,6 +3038,22 @@ export class AutonomousNavigationController {
           this.isTrainingEpisode,
           this.episodeRng
         );
+
+        if (
+          selection.action === 'STOP_TEMPORARILY' ||
+          (hazard.imminentStopRequired && selection.action === 'MAINTAIN_SPEED')
+        ) {
+          this.consecutiveStopsCount += 1;
+        } else if (selection.action === 'LOCAL_AVOIDANCE') {
+          this.consecutiveStopsCount = 0;
+          this.consecutiveReplansCount = 0;
+        }
+
+        if (selection.action === 'GLOBAL_REPLAN') {
+          this.consecutiveReplansCount += 1;
+        } else if (selection.action !== 'STOP_TEMPORARILY') {
+          this.consecutiveReplansCount = 0;
+        }
 
         this.lastRlStateKey = selection.stateKey;
         this.lastRlAction = selection.action;
@@ -2955,18 +3093,68 @@ export class AutonomousNavigationController {
             this.currentWaypointIdx = bypass.resumeIdx;
             this.localBypassCount += 1;
             this.avoidedEncountersCount += 1;
-            this.localBypassCooldownSec = 2.2;
+            this.localBypassCooldownSec = 1.05;
+            this.pedestrianYieldTimerSec = 0;
+            this.deadlockWaitTimerSec = 0;
+            this.consecutiveStopsCount = 0;
             this.activeAvoidanceLevel = 'Level 4: Local Bypass';
             this.robotOpState = 'Local Bypass';
             this.navStatusText = `Q-Policy Local Bypass: Passing around ${conflictPed.name}`;
             this.emitPathUpdate();
+            // Re-evaluate forward path hazard along the newly spliced bypass trajectory
+            hazard = evaluateActivePathPedestrianHazard(
+              this.robotPos,
+              this.waypoints,
+              this.currentWaypointIdx,
+              this.pedestrianAgents,
+              this.perceptionProfile.visibilityRangeM,
+              effectivePolicyClearance,
+              this.perceptionProfile.sensorNoiseStdM,
+              this.elapsedTimeSec
+            );
+          } else if (hazard.pathObstructedAhead && this.replanCooldownSec <= 0) {
+            const detourZones: PredictedGridPenaltyZone[] = [
+              ...predictive.penaltyZones,
+              {
+                pos: {
+                  x: conflictPed.currentPos.x,
+                  z: conflictPed.currentPos.z,
+                },
+                radiusM: Math.max(2.1, (conflictPed.radius ?? 0.5) + 1.4),
+                costPenalty: 14.0,
+                pedestrianName: conflictPed.name,
+              },
+            ];
+            const replanOk = this.attemptDynamicReplanAroundPedestrians(
+              conflictPed.name,
+              detourZones,
+              false
+            );
+            if (replanOk) {
+              this.localBypassCount += 1;
+              this.avoidedEncountersCount += 1;
+              this.localBypassCooldownSec = 1.05;
+              this.pedestrianYieldTimerSec = 0;
+              this.deadlockWaitTimerSec = 0;
+              this.consecutiveStopsCount = 0;
+              hazard = evaluateActivePathPedestrianHazard(
+                this.robotPos,
+                this.waypoints,
+                this.currentWaypointIdx,
+                this.pedestrianAgents,
+                this.perceptionProfile.visibilityRangeM,
+                effectivePolicyClearance,
+                this.perceptionProfile.sensorNoiseStdM,
+                this.elapsedTimeSec
+              );
+            }
           }
         } else if (
           selection.action === 'GLOBAL_REPLAN' &&
           conflictPed &&
           this.replanCooldownSec <= 0
         ) {
-          if (temporaryObstructionPresent) {
+          if (temporaryObstructionPresent || this.consecutiveReplansCount > 1) {
             this.unnecessaryReplanCount += 1;
           }
           this.attemptDynamicReplanAroundPedestrians(
@@ -2982,7 +3170,6 @@ export class AutonomousNavigationController {
       if (activeAction === 'MAINTAIN_SPEED') {
         this.activeAvoidanceLevel = 'Level 1: Maintain Path';
         if (hasConflictOrHazard) {
-          // Mild predictive caution even in maintain speed
           desiredSpeed *= Math.max(0.82, predictive.recommendedSpeedScale);
         }
       } else if (activeAction === 'REDUCE_SPEED') {
@@ -2998,7 +3185,7 @@ export class AutonomousNavigationController {
           predictive.recommendedSpeedScale,
           hazard.speedScaleFactor
         );
-        desiredSpeed *= Math.max(0.35, Math.min(0.78, scale));
+        desiredSpeed *= Math.max(0.38, Math.min(0.78, scale));
         this.robotOpState = 'Speed Regulation';
         this.navStatusText = `Q-Policy Level 2 Speed Regulation (${desiredSpeed.toFixed(
           2
@@ -3008,13 +3195,16 @@ export class AutonomousNavigationController {
         desiredSpeed = 0;
         this.totalWaitingTimeSec += subDt;
         this.pedestrianWaitingTimeSec += subDt;
+        if (hazard.pathObstructedAhead) {
+          this.pedestrianYieldTimerSec += subDt;
+        }
         if ((hazard.nearestActualDist ?? 99) > 2.2) {
           this.unnecessaryStopsCount += 1;
         }
         this.robotOpState = 'Obstacle Yield';
         this.navStatusText = `Q-Policy Temporary Yield`;
       } else if (activeAction === 'LOCAL_AVOIDANCE') {
-        desiredSpeed *= 0.76;
+        desiredSpeed *= 0.8;
       } else if (activeAction === 'GLOBAL_REPLAN') {
         desiredSpeed *= 0.72;
       }
@@ -3025,16 +3215,20 @@ export class AutonomousNavigationController {
 
       // ==========================================================================
       // CRITICAL HARD SAFETY LAYER (Cannot be overridden by learned policy!)
-      // Enforces minimum safety distance, emergency stopping, and deadlock recovery
+      // Strictly prevents physical collisions at close range while requiring the
+      // policy to select a valid avoidance action rather than auto-rescuing bad policies.
       // ==========================================================================
       if (hazard.imminentStopRequired && conflictPed) {
         const dist = hazard.nearestActualDist ?? 99;
         if (dist < 1.38) {
-          if (this.pedestrianYieldTimerSec === 0) {
+          if (!this.inSafetyInterventionEpisode && this.safetyInterventionCooldownSec <= 0) {
+            this.inSafetyInterventionEpisode = true;
             this.safetyInterventionCount += 1;
+            this.safetyInterventionCooldownSec = 2.0;
           }
           // Hard Safety Override: prevent physical collision regardless of learned policy action
           desiredSpeed = 0;
+          this.currentSpeedMps = 0;
           this.totalWaitingTimeSec += subDt;
           this.pedestrianWaitingTimeSec += subDt;
           this.pedestrianYieldTimerSec += subDt;
@@ -3043,45 +3237,71 @@ export class AutonomousNavigationController {
           this.navStatusText = `Safety Layer Protected Stop (${dist.toFixed(
             2
           )}m to ${conflictPed.name})`;
-
-          // If stuck at close range for > 1.0s, safety layer triggers local bypass or replan so robot never deadlocks
-          if (this.pedestrianYieldTimerSec >= 1.0 && this.localBypassCooldownSec <= 0) {
-            this.safetyInterventionCount += 1;
-            const safetyBypass = computeLocalBypassWaypoints(
-              this.robotPos,
-              this.waypoints,
-              this.currentWaypointIdx,
-              conflictPed,
-              this.currentScenario.activeConstructionZones,
-              this.pedestrianAgents
-            );
-            if (safetyBypass) {
-              this.waypoints = safetyBypass.splicedWaypoints;
-              this.currentWaypointIdx = safetyBypass.resumeIdx;
-              this.localBypassCount += 1;
-              this.avoidedEncountersCount += 1;
-              this.localBypassCooldownSec = 2.0;
-              this.pedestrianYieldTimerSec = 0;
-              desiredSpeed = nominalCruiseSpeed * 0.65;
-              this.emitPathUpdate();
-            } else if (
-              this.pedestrianYieldTimerSec >= 2.2 &&
-              this.replanCooldownSec <= 0
-            ) {
-              this.pedestrianYieldTimerSec = 0;
-              this.attemptDynamicReplanAroundPedestrians(
-                conflictPed.name,
-                predictive.penaltyZones,
-                false
-              );
-            }
-          }
+        } else {
+          this.inSafetyInterventionEpisode = false;
         }
       } else {
-        this.pedestrianYieldTimerSec = Math.max(
-          0,
-          this.pedestrianYieldTimerSec - subDt * 0.5
-        );
+        this.inSafetyInterventionEpisode = false;
+        if (activeAction !== 'STOP_TEMPORARILY') {
+          this.pedestrianYieldTimerSec = Math.max(
+            0,
+            this.pedestrianYieldTimerSec - subDt * 0.5
+          );
+        }
+      }
+
+      // If the policy stays stalled at a blockage for >= maxDeadlockWaitSec without resolving it via LOCAL_AVOIDANCE,
+      // terminate episode as a genuine Pathway Deadlock (Safe Stop — never counted as a successful delivery!)
+      if (this.pedestrianYieldTimerSec >= this.maxDeadlockWaitSec && conflictPed) {
+        this.deadlockCount += 1;
+        const reason = `Pathway Deadlock: Robot remained blocked by ${
+          conflictPed.name
+        } for ${this.pedestrianYieldTimerSec.toFixed(
+          1
+        )}s without resolving corridor obstruction (Safety Interventions: ${
+          this.safetyInterventionCount
+        }).`;
+        this.runState = 'failed';
+        this.currentSpeedMps = 0;
+        this.robotOpState = 'Emergency Stop';
+        this.navStatusText = reason;
+        this.callbacks.onStatusChanged?.(this.robotOpState, this.navStatusText);
+        this.callbacks.onLogEvent?.('error', reason);
+        this.emitCompletion({
+          status: 'Failed',
+          durationSec: Number(this.elapsedTimeSec.toFixed(1)),
+          distanceMeters: Number(this.distanceTraveledM.toFixed(1)),
+          collisions: this.collisionsCount,
+          replanCount: this.replanCount,
+          pedestrianDetectionsCount: this.pedestrianDetectionsCount,
+          predictedEncountersCount: this.predictedEncountersCount,
+          avoidedEncountersCount: this.avoidedEncountersCount,
+          unnecessaryStopsCount: this.unnecessaryStopsCount,
+          predictionAccuracyPct: Number(this.predictionAccuracyPct.toFixed(1)),
+          pedestrianReplanCount: this.pedestrianReplanCount,
+          speedReductionEventsCount: this.speedReductionEventsCount,
+          reducedSpeedTimeSec: Number(this.reducedSpeedTimeSec.toFixed(1)),
+          pedestrianWaitingTimeSec: Number(this.pedestrianWaitingTimeSec.toFixed(1)),
+          speedBasedAvoidanceCount: this.speedBasedAvoidanceCount,
+          localBypassCount: this.localBypassCount,
+          globalReplanCount: this.globalReplanCount,
+          totalWaitingTimeSec: Number(this.totalWaitingTimeSec.toFixed(1)),
+          elevatorWaitTimeSec: Number(this.elevatorWaitTimeSec.toFixed(1)),
+          batteryConsumedPct: Number(
+            (this.initialBatteryPct - this.batteryPct).toFixed(1)
+          ),
+          failureType: 'Pathway Deadlock',
+          obstacleType: 'Dynamic Pedestrian',
+          failureReason: reason,
+          rootCause: reason,
+          mitigationSuggested:
+            'Continue Q-Learning training so the policy learns to select LOCAL_AVOIDANCE when path:blocked or stl:stalled.',
+          failureCoordinates: {
+            x: Number(this.robotPos.x.toFixed(1)),
+            z: Number(this.robotPos.z.toFixed(1)),
+          },
+        });
+        return;
       }
     } else if (!this.isRobotIndoor) {
       // ==========================================================================
@@ -3184,8 +3404,9 @@ export class AutonomousNavigationController {
 
         // Check if LEVEL 3 (Temporary Stop) is required to protect the collision safety boundary
         if (hazard.imminentStopRequired && conflictPed) {
-          if (this.pedestrianYieldTimerSec === 0) {
+          if (this.safetyInterventionCooldownSec <= 0) {
             this.safetyInterventionCount += 1;
+            this.safetyInterventionCooldownSec = 2.0;
           }
           desiredSpeed = 0;
           this.pedestrianYieldTimerSec += subDt;
@@ -3623,7 +3844,10 @@ export class AutonomousNavigationController {
 
       if (hit && hit.collided) {
         if (hit.obstacleType === 'Dynamic Pedestrian') {
-          this.safetyInterventionCount += 1;
+          if (this.safetyInterventionCooldownSec <= 0) {
+            this.safetyInterventionCount += 1;
+            this.safetyInterventionCooldownSec = 2.0;
+          }
           this.robotPos = hit.safePosition;
           this.currentSpeedMps = 0;
           this.totalWaitingTimeSec += subDt;
@@ -3723,6 +3947,27 @@ export class AutonomousNavigationController {
         this.batteryPct -
           stepM * 0.065 * this.currentScenario.batteryDrainMultiplier
       );
+
+      // Record downsampled trajectory point every 0.5s for Before vs After Demonstration
+      if (
+        this.lastTrajectorySampleTimeSec < 0 ||
+        this.elapsedTimeSec - this.lastTrajectorySampleTimeSec >= 0.5
+      ) {
+        this.lastTrajectorySampleTimeSec = this.elapsedTimeSec;
+        this.trajectorySamples.push({
+          t: Number(this.elapsedTimeSec.toFixed(1)),
+          x: Number(this.robotPos.x.toFixed(2)),
+          z: Number(this.robotPos.z.toFixed(2)),
+          y: Number(this.robotAltitudeY.toFixed(2)),
+          floor: this.currentFloor,
+          speedMps: Number(this.currentSpeedMps.toFixed(2)),
+          robotStatus: this.robotOpState,
+          actionTaken: this.lastRlAction ?? this.activeAvoidanceLevel,
+          replanCount: this.globalReplanCount,
+          waitingTimeSec: Number(this.totalWaitingTimeSec.toFixed(1)),
+          safetyInterventions: this.safetyInterventionCount,
+        });
+      }
 
       // Check for Battery Depletion Failure
       if (this.batteryPct <= 0.5) {
@@ -3874,6 +4119,7 @@ export class AutonomousNavigationController {
       deadlockOccurred:
         this.deadlockCount > 0 || partial.failureType === 'Pathway Deadlock',
       waitingTimeSec: partial.totalWaitingTimeSec,
+      safetyInterventions: this.safetyInterventionCount,
     });
     this.episodeReward = Number((this.episodeReward + terminalReward).toFixed(1));
 
@@ -3888,24 +4134,27 @@ export class AutonomousNavigationController {
           null,
           true
         );
+        this.qTableUpdatesCount += 1;
       }
       // Eligibility trace credit assignment over the episode's key decision steps
       const traceLen = this.episodeTrajectoryTrace.length;
       const perStepBonus =
         partial.status === 'Success'
-          ? 2.4
+          ? 2.8
           : partial.collisions > 0
-          ? -4.5
-          : -2.0;
+          ? -5.0
+          : -3.5;
       for (let i = Math.max(0, traceLen - 12); i < traceLen; i++) {
         const item = this.episodeTrajectoryTrace[i];
         // Reinforce good local decisions (REDUCE_SPEED / LOCAL_AVOIDANCE) on successful episodes
         const actionBonus =
           partial.status === 'Success' &&
           (item.action === 'REDUCE_SPEED' || item.action === 'LOCAL_AVOIDANCE')
-            ? perStepBonus * 1.4
+            ? perStepBonus * 1.5
             : item.action === 'GLOBAL_REPLAN'
-            ? -2.5
+            ? -3.0
+            : item.action === 'STOP_TEMPORARILY' && partial.status === 'Failed'
+            ? -4.0
             : perStepBonus * 0.6;
         updateQTableStep(
           this.candidatePolicyState,
@@ -3915,6 +4164,7 @@ export class AutonomousNavigationController {
           null,
           true
         );
+        this.qTableUpdatesCount += 1;
       }
     }
 
@@ -4004,6 +4254,23 @@ export class AutonomousNavigationController {
         this.deadlockCount ||
         (partial.failureType === 'Pathway Deadlock' ? 1 : 0),
       episodeReward: this.episodeReward,
+      qTableUpdatesCount: this.qTableUpdatesCount,
+      trajectorySamples: [
+        ...this.trajectorySamples,
+        {
+          t: Number(partial.durationSec.toFixed(1)),
+          x: Number(this.robotPos.x.toFixed(2)),
+          z: Number(this.robotPos.z.toFixed(2)),
+          y: Number(this.robotAltitudeY.toFixed(2)),
+          floor: this.currentFloor,
+          speedMps: 0,
+          robotStatus: partial.status === 'Success' ? 'Delivered' : 'Halted',
+          actionTaken: partial.status,
+          replanCount: this.globalReplanCount,
+          waitingTimeSec: Number(partial.totalWaitingTimeSec.toFixed(1)),
+          safetyInterventions: this.safetyInterventionCount,
+        },
+      ],
       decisionHistory:
         this.decisionHistory.length > 0
           ? [...this.decisionHistory]

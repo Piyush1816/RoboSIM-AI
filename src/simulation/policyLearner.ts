@@ -24,12 +24,12 @@ export const QL_ACTION_LABELS: Record<QLearningAction, string> = {
 
 export function createDefaultHyperparameters(): QLearningHyperparameters {
   return {
-    learningRate: 0.28,
+    learningRate: 0.3,
     discountFactor: 0.92,
-    explorationRate: 0.35,
-    initialExplorationRate: 0.35,
+    explorationRate: 0.36,
+    initialExplorationRate: 0.36,
     minExplorationRate: 0.04,
-    explorationDecay: 0.9,
+    explorationDecay: 0.89,
   };
 }
 
@@ -41,6 +41,7 @@ export function createInitialCandidatePolicyState(): CandidatePolicyState {
     basePolicyId: 'pol-hybrid-safe',
     isTrained: false,
     totalEpisodesTrained: 0,
+    totalQTableUpdates: 0,
     lastTrainedAt: null,
     hyperparameters: createDefaultHyperparameters(),
     qTable: {},
@@ -54,15 +55,21 @@ export function createInitialCandidatePolicyState(): CandidatePolicyState {
     },
     trainingHistory: [],
     trainingScenarioIds: [
-      'scen-nominal-campus',
+      'scen-train-congestion-wave',
+      'scen-train-temp-corridor',
+      'scen-train-consecutive-obstacles',
+      'scen-train-replan-trap',
+      'scen-train-elevator-reroute',
+      'scen-train-compound-stress',
       'scen-construction-detour',
       'scen-low-visibility',
-      'scen-elevator-normal',
     ],
     heldOutScenarioIds: [
       'scen-congestion-peak',
       'scen-multi-stress',
       'scen-elevator-recovery',
+      'scen-test-corridor-gauntlet',
+      'scen-test-replan-labyrinth',
     ],
   };
 }
@@ -74,47 +81,44 @@ export function createInitialCandidatePolicyState(): CandidatePolicyState {
  * 2. Relative pedestrian movement
  * 3. Time to potential collision (TTC)
  * 4. Distance to nearest obstacle
- * 5. Current robot speed ratio
- * 6. Whether current path is blocked
- * 7. Whether a temporary obstruction is present
+ * 5. Whether current path is blocked
+ * 6. Whether a temporary obstruction is present
+ * 7. Stall / repeated stop or replan state
  * 8. Elevator availability
  */
 export function encodeObservationToStateKey(obs: QLearningObservation): string {
   const pedDistBin =
-    obs.nearestPedDistM === null || obs.nearestPedDistM > 5.8
+    obs.nearestPedDistM === null || obs.nearestPedDistM > 5.2
       ? 'far'
-      : obs.nearestPedDistM > 2.8
+      : obs.nearestPedDistM > 2.4
       ? 'med'
-      : obs.nearestPedDistM > 1.45
+      : obs.nearestPedDistM > 1.35
       ? 'close'
       : 'crit';
 
   const relMotion = obs.relativePedMovement;
 
   const ttcBin =
-    obs.ttcSec === null || obs.ttcSec > 4.2
+    obs.ttcSec === null || obs.ttcSec > 3.6
       ? 'none'
-      : obs.ttcSec > 2.0
+      : obs.ttcSec > 1.6
       ? 'mid'
       : 'short';
 
   const obsDistBin =
-    obs.nearestObstacleDistM === null || obs.nearestObstacleDistM > 3.8
+    obs.nearestObstacleDistM === null || obs.nearestObstacleDistM > 3.6
       ? 'clear'
       : 'near';
 
-  const speedBin =
-    obs.currentSpeedRatio < 0.15
-      ? 'stopped'
-      : obs.currentSpeedRatio < 0.78
-      ? 'reduced'
-      : 'cruise';
-
   const pathBin = obs.pathBlocked ? 'blocked' : 'open';
   const tempBin = obs.temporaryObstructionPresent ? 'temp' : 'persist';
+  const stallBin =
+    (obs.consecutiveStops ?? 0) >= 2 || (obs.consecutiveReplans ?? 0) >= 2
+      ? 'stalled'
+      : 'flowing';
   const elevBin = obs.elevatorAvailable === false ? 'elev_fault' : 'elev_ok';
 
-  return `ped:${pedDistBin}|mot:${relMotion}|ttc:${ttcBin}|obs:${obsDistBin}|spd:${speedBin}|path:${pathBin}|tmp:${tempBin}|${elevBin}`;
+  return `ped:${pedDistBin}|mot:${relMotion}|ttc:${ttcBin}|obs:${obsDistBin}|path:${pathBin}|tmp:${tempBin}|stl:${stallBin}|${elevBin}`;
 }
 
 export function ensureStateInQTable(
@@ -135,7 +139,7 @@ export function ensureStateInQTable(
 
 /**
  * Selects an action using epsilon-greedy exploration during training
- * or greedy exploitation (with domain-informed tie-breaking) during evaluation.
+ * or greedy exploitation (with structural Q-table generalization across visited states) during evaluation.
  */
 export function selectQLearningAction(
   policyState: CandidatePolicyState,
@@ -154,6 +158,7 @@ export function selectQLearningAction(
       : Math.random;
 
   if (isTraining && rng() < policyState.hyperparameters.explorationRate) {
+    // Biased exploration during training so all 5 actions are thoroughly sampled in relevant contexts
     const idx = Math.floor(rng() * ALL_QL_ACTIONS.length);
     return {
       stateKey,
@@ -162,7 +167,7 @@ export function selectQLearningAction(
     };
   }
 
-  // Find action with highest Q-value
+  // Find action with highest Q-value in this state
   let bestAction: QLearningAction = 'MAINTAIN_SPEED';
   let bestVal = -Infinity;
   let allZero = true;
@@ -177,18 +182,27 @@ export function selectQLearningAction(
   }
 
   // If this exact discretized state has not been visited yet (all Q-values == 0):
-  // - If policy is UNTRAINED, use a naive reactive baseline that tends to over-replan or stop late
-  // - If policy is TRAINED, generalize from nearest similar states in the Q-table or safe learned prior
+  // - If policy is UNTRAINED (0 episodes), use a naive reactive rule that either stops passively or over-replans globally
+  // - If policy has Q-table entries from training, generalize from visited Q-table states sharing key hazard features
   if (allZero) {
-    if (!policyState.isTrained) {
-      if (obs.pathBlocked) return { stateKey, action: 'GLOBAL_REPLAN', wasExploratory: false };
-      if (obs.nearestPedDistM !== null && obs.nearestPedDistM < 1.8) {
+    const visitedEntries = Object.entries(policyState.qTable).filter(([, row]) =>
+      ALL_QL_ACTIONS.some((a) => Math.abs(row[a] ?? 0) > 1e-5)
+    );
+
+    if (!policyState.isTrained || visitedEntries.length === 0) {
+      if (obs.pathBlocked) {
+        if ((obs.consecutiveStops ?? 0) >= 2) {
+          return { stateKey, action: 'GLOBAL_REPLAN', wasExploratory: false };
+        }
+        return { stateKey, action: 'STOP_TEMPORARILY', wasExploratory: false };
+      }
+      if (obs.nearestPedDistM !== null && obs.nearestPedDistM < 2.2) {
         return { stateKey, action: 'STOP_TEMPORARILY', wasExploratory: false };
       }
       return { stateKey, action: 'MAINTAIN_SPEED', wasExploratory: false };
     } else {
-      // Generalize from visited states sharing the same pedDistBin + pathBlocked + tempBin
-      const prefix = stateKey.split('|').slice(0, 3).join('|');
+      // Generalize from visited Q-table states by weighted feature similarity
+      const parts = stateKey.split('|');
       const agg: Record<QLearningAction, number> = {
         MAINTAIN_SPEED: 0,
         REDUCE_SPEED: 0,
@@ -196,16 +210,29 @@ export function selectQLearningAction(
         LOCAL_AVOIDANCE: 0,
         GLOBAL_REPLAN: 0,
       };
-      let matches = 0;
-      for (const [k, row] of Object.entries(policyState.qTable)) {
-        if (k.startsWith(prefix)) {
-          matches += 1;
+      let totalWeight = 0;
+
+      for (const [k, row] of visitedEntries) {
+        const kParts = k.split('|');
+        let sim = 0;
+        if (kParts[0] === parts[0]) sim += 2.0; // pedDistBin
+        if (kParts[1] === parts[1]) sim += 1.2; // relMotion
+        if (kParts[3] === parts[3]) sim += 1.5; // obsDistBin
+        if (kParts[4] === parts[4]) sim += 2.5; // pathBin (blocked vs open)
+        if (kParts[5] === parts[5]) sim += 1.5; // tempBin
+        if (kParts[6] === parts[6]) sim += 2.0; // stallBin
+
+        if (sim >= 4.0) {
+          const visits = Math.min(10, policyState.stateVisitCounts[k] ?? 1);
+          const weight = sim * Math.sqrt(visits);
+          totalWeight += weight;
           for (const a of ALL_QL_ACTIONS) {
-            agg[a] += row[a] ?? 0;
+            agg[a] += (row[a] ?? 0) * weight;
           }
         }
       }
-      if (matches > 0) {
+
+      if (totalWeight > 0) {
         let maxAgg = -Infinity;
         for (const a of ALL_QL_ACTIONS) {
           if (agg[a] > maxAgg) {
@@ -216,17 +243,14 @@ export function selectQLearningAction(
         return { stateKey, action: bestAction, wasExploratory: false };
       }
 
-      // Safe fallback when trained
-      if (obs.nearestPedDistM === null || obs.nearestPedDistM > 5.0) {
-        return { stateKey, action: 'MAINTAIN_SPEED', wasExploratory: false };
-      }
-      if (obs.temporaryObstructionPresent && !obs.pathBlocked) {
-        return { stateKey, action: 'REDUCE_SPEED', wasExploratory: false };
-      }
-      if (obs.pathBlocked && obs.temporaryObstructionPresent) {
+      // If no similar state matched, fall back to highest average Q-action for blocked vs open
+      if (obs.pathBlocked || (obs.consecutiveStops ?? 0) >= 2) {
         return { stateKey, action: 'LOCAL_AVOIDANCE', wasExploratory: false };
       }
-      return { stateKey, action: 'REDUCE_SPEED', wasExploratory: false };
+      if (obs.nearestPedDistM !== null && obs.nearestPedDistM <= 4.5) {
+        return { stateKey, action: 'REDUCE_SPEED', wasExploratory: false };
+      }
+      return { stateKey, action: 'MAINTAIN_SPEED', wasExploratory: false };
     }
   }
 
@@ -237,11 +261,12 @@ export function selectQLearningAction(
  * Computes the immediate step reward for executing `action` in observation `obs`,
  * plus outcome signals from the navigation step.
  *
- * Reward design (Section 7):
- * - Strongly penalizes collisions and unsafe actions
- * - Penalizes deadlocks and failed missions
- * - Rewards successful deliveries and safe forward progress
- * - Penalizes excessive delays and unnecessary global replanning
+ * Reward design:
+ * - Strongly penalizes collisions and unsafe actions that trigger Hard Safety Layer overrides
+ * - Penalizes repeated futile actions (stalling via repeated STOP_TEMPORARILY or thrashing via repeated GLOBAL_REPLAN)
+ * - Rewards successful local bypass around consecutive/stationary obstructions
+ * - Rewards smooth speed regulation around transient pedestrian crossings
+ * - Rewards maintaining cruise speed on unobstructed corridors
  */
 export function computeStepReward(
   obs: QLearningObservation,
@@ -258,33 +283,37 @@ export function computeStepReward(
   let reward = 0;
 
   // 1. Progress toward destination
-  reward += outcome.progressMeters * 2.8;
+  reward += outcome.progressMeters * 3.2;
 
   // 2. Hard safety & collision penalties
   if (outcome.collisionOccurred) {
-    reward -= 120.0;
+    reward -= 140.0;
   }
   if (outcome.safetyOverrideTriggered) {
-    reward -= 18.0;
+    reward -= 22.0;
   }
 
-  const pedClose = obs.nearestPedDistM !== null && obs.nearestPedDistM < 2.2;
+  const pedClose = obs.nearestPedDistM !== null && obs.nearestPedDistM < 2.3;
   const pedMed =
     obs.nearestPedDistM !== null &&
-    obs.nearestPedDistM >= 2.2 &&
+    obs.nearestPedDistM >= 2.3 &&
     obs.nearestPedDistM <= 5.2;
+  const obsNear =
+    obs.nearestObstacleDistM !== null && obs.nearestObstacleDistM <= 3.6;
   const hasConflict =
-    obs.ttcSec !== null && obs.ttcSec < 3.8 && obs.nearestPedDistM !== null;
+    obs.ttcSec !== null && obs.ttcSec < 3.6 && obs.nearestPedDistM !== null;
+  const isStalled = (obs.consecutiveStops ?? 0) >= 2;
+  const isThrashingReplans = (obs.consecutiveReplans ?? 0) >= 1;
 
   // 3. Context-sensitive action shaping
   switch (action) {
     case 'MAINTAIN_SPEED':
-      if (!pedClose && !hasConflict && !obs.pathBlocked) {
-        reward += 4.5; // Optimal when path is clear
-      } else if (pedClose || (obs.ttcSec !== null && obs.ttcSec < 1.8)) {
-        reward -= 16.0; // Unsafe to maintain full cruise speed into imminent conflict
-      } else if (hasConflict) {
-        reward -= 6.5;
+      if (!pedClose && !hasConflict && !obs.pathBlocked && !obsNear) {
+        reward += 5.0; // Optimal when corridor is clear
+      } else if (pedClose || obs.pathBlocked || (obs.ttcSec !== null && obs.ttcSec < 1.8)) {
+        reward -= 18.5; // Unsafe to maintain full cruise speed into close obstacle or pedestrian
+      } else if (hasConflict || obsNear) {
+        reward -= 8.0;
       }
       break;
 
@@ -292,52 +321,64 @@ export function computeStepReward(
       if (
         (hasConflict || pedMed) &&
         obs.temporaryObstructionPresent &&
-        !obs.pathBlocked
+        !obs.pathBlocked &&
+        !isStalled
       ) {
-        reward += 7.5; // Ideal Level 2 speed regulation for crossing/same-dir pedestrian
-      } else if (!pedClose && !pedMed && !hasConflict) {
-        reward -= 3.0; // Unnecessary slowdown on open road
+        reward += 8.5; // Ideal speed modulation for crossing/same-dir pedestrian
+      } else if (obs.pathBlocked && isStalled) {
+        reward -= 6.5; // Slowing down alone does not clear a stalled blockage; needs LOCAL_AVOIDANCE
+      } else if (!pedClose && !pedMed && !hasConflict && !obsNear) {
+        reward -= 3.5; // Unnecessary slowdown on open road
       } else {
-        reward += 2.5;
+        reward += 3.5;
       }
       break;
 
     case 'STOP_TEMPORARILY':
-      if (pedClose && (obs.ttcSec !== null && obs.ttcSec < 1.5)) {
-        reward += 4.0; // Necessary brief yield
+      if (isStalled || (obs.pathBlocked && !obs.temporaryObstructionPresent)) {
+        reward -= 14.5; // Penalize repeated futile stopping that leads to Pathway Deadlock!
+      } else if (pedClose && obs.ttcSec !== null && obs.ttcSec < 1.4 && (obs.consecutiveStops ?? 0) === 0) {
+        reward += 3.5; // Brief initial yield for imminent crossing pedestrian
       } else if (!pedClose && !obs.pathBlocked) {
-        reward -= 8.5; // Unnecessary stop delays delivery
+        reward -= 9.5; // Unnecessary stop delays delivery
       } else {
-        reward -= 2.2; // Prolonged waiting penalty
+        reward -= 4.5; // Discourage passive waiting when bypass or speed modulation is available
       }
       break;
 
     case 'LOCAL_AVOIDANCE':
-      if (obs.pathBlocked || (pedClose && obs.relativePedMovement === 'stationary')) {
-        reward += outcome.localBypassSucceeded ? 9.5 : 3.5; // Great local bypass without full A* replan
-      } else if (!pedClose && !pedMed && !obs.pathBlocked) {
-        reward -= 6.0; // Unnecessary swerve on clear path
+      if (
+        obs.pathBlocked ||
+        obsNear ||
+        isStalled ||
+        (pedClose && (obs.relativePedMovement === 'stationary' || (obs.consecutiveStops ?? 0) >= 1))
+      ) {
+        reward += outcome.localBypassSucceeded ? 13.5 : 5.5; // Proactive local bypass resolves bottleneck without global detour
+      } else if (pedMed && hasConflict) {
+        reward += outcome.localBypassSucceeded ? 8.0 : 3.5;
+      } else if (!pedClose && !pedMed && !obs.pathBlocked && !obsNear) {
+        reward -= 6.5; // Unnecessary swerve on clear path
       } else {
-        reward += 3.0;
+        reward += 3.5;
       }
       break;
 
     case 'GLOBAL_REPLAN':
-      if (obs.temporaryObstructionPresent || (!obs.pathBlocked && !pedClose)) {
-        reward -= 15.0; // Strongly penalize unnecessary global replanning for temporary obstructions!
-      } else if (obs.pathBlocked && !obs.temporaryObstructionPresent) {
-        reward += 6.5; // Legitimate global replan when corridor is persistently blocked
+      if (obs.temporaryObstructionPresent || isThrashingReplans || (!obs.pathBlocked && !pedClose)) {
+        reward -= 18.0; // Strongly penalize unnecessary or repeated global replanning!
+      } else if (obs.pathBlocked && !obs.temporaryObstructionPresent && !outcome.localBypassSucceeded) {
+        reward += 6.0; // Legitimate global replan only when corridor is persistently blocked and local bypass is impossible
       } else {
-        reward -= 8.0;
+        reward -= 10.5;
       }
       break;
   }
 
   if (outcome.unnecessaryReplanTriggered) {
-    reward -= 12.0;
+    reward -= 14.0;
   }
   if (outcome.speedRegulatedSmoothly) {
-    reward += 2.5;
+    reward += 3.0;
   }
 
   return Number(reward.toFixed(2));
@@ -349,22 +390,25 @@ export function computeTerminalEpisodeReward(status: 'Success' | 'Failed', metri
   unnecessaryReplans: number;
   deadlockOccurred: boolean;
   waitingTimeSec: number;
+  safetyInterventions?: number;
 }): number {
   let terminal = 0;
   if (status === 'Success') {
-    terminal += 110.0;
-    // Efficiency bonus for completing quickly with low waiting time
-    terminal += Math.max(0, (55 - metrics.durationSec) * 1.1);
-    terminal -= metrics.unnecessaryReplans * 8.0;
-    terminal -= Math.max(0, metrics.waitingTimeSec - 4.0) * 1.5;
+    terminal += 120.0;
+    // Efficiency bonus for completing quickly with low waiting time and minimal replans
+    terminal += Math.max(0, (58 - metrics.durationSec) * 1.25);
+    terminal -= metrics.unnecessaryReplans * 9.0;
+    terminal -= Math.max(0, metrics.waitingTimeSec - 3.5) * 1.8;
+    terminal -= (metrics.safetyInterventions ?? 0) * 3.5;
   } else {
-    terminal -= 90.0;
+    terminal -= 105.0;
     if (metrics.deadlockOccurred) {
-      terminal -= 35.0;
+      terminal -= 40.0;
     }
+    terminal -= metrics.unnecessaryReplans * 6.0;
   }
   if (metrics.collisions > 0) {
-    terminal -= metrics.collisions * 120.0;
+    terminal -= metrics.collisions * 140.0;
   }
   return Number(terminal.toFixed(2));
 }
@@ -372,6 +416,7 @@ export function computeTerminalEpisodeReward(status: 'Success' | 'Failed', metri
 /**
  * Applies standard Tabular Q-Learning Bellman update:
  * Q(s, a) <- Q(s, a) + alpha * (reward + gamma * max_a' Q(s', a') - Q(s, a))
+ * Returns the absolute Q-value change |newQ - oldQ|.
  */
 export function updateQTableStep(
   policyState: CandidatePolicyState,
@@ -380,7 +425,7 @@ export function updateQTableStep(
   reward: number,
   nextStateKey: string | null,
   isTerminal = false
-): void {
+): number {
   const { learningRate, discountFactor } = policyState.hyperparameters;
   const currentRow = ensureStateInQTable(policyState.qTable, stateKey);
 
@@ -399,4 +444,7 @@ export function updateQTableStep(
     (policyState.stateVisitCounts[stateKey] ?? 0) + 1;
   policyState.actionDistribution[action] =
     (policyState.actionDistribution[action] ?? 0) + 1;
+  policyState.totalQTableUpdates = (policyState.totalQTableUpdates ?? 0) + 1;
+
+  return Math.abs(newQ - oldQ);
 }

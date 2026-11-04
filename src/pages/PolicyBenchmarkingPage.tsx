@@ -819,6 +819,32 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
         )}
       </div>
 
+      {/* Untrained Candidate Policy Warning Banner */}
+      {!candidatePolicyState.isTrained && (
+        <div className="bg-amber-500/10 border border-amber-500/40 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs text-amber-200">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <strong className="text-amber-300 block">
+                Candidate Policy is Currently Untrained (0 Episodes · 0 Q-Table States)
+              </strong>
+              <span>
+                Running the held-out benchmark right now will evaluate the untrained initial
+                policy (which typically stalls or fails on multi-obstacle corridors). Train the
+                Candidate Policy on the 6-stage curriculum first to verify closed-loop
+                improvement.
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={() => onNavigate('robot-policies')}
+            className="px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold shrink-0 cursor-pointer"
+          >
+            Train Candidate Policy First →
+          </button>
+        </div>
+      )}
+
       {/* Results Display */}
       {!latestBenchmark ? (
         <div className="bg-[#0d1322] border border-slate-800 rounded-xl p-10 text-center space-y-3">
@@ -836,137 +862,181 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
         </div>
       ) : (
         <>
+
           {/* Overall Narrative Summary & Improvements/Remaining Weaknesses */}
           <div className="bg-[#0d1322] border border-cyan-500/30 rounded-xl p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-xs font-mono text-cyan-400">
-                  BENCHMARK SUITE #{latestBenchmark.id} · {latestBenchmark.timestamp}
-                </div>
-                <h3 className="font-display font-semibold text-lg text-slate-100">
-                  Side-by-Side Policy Verification Summary
-                </h3>
-              </div>
-              <TrendingUp className="w-5 h-5 text-emerald-400" />
-            </div>
+            {(() => {
+              const baseSucc = latestBenchmark.baselineMetrics.successRatePct;
+              const candSucc = latestBenchmark.candidateMetrics.successRatePct;
+              const baseFail =
+                latestBenchmark.baselineMetrics.navigationFailuresCount ??
+                latestBenchmark.baselineMetrics.episodesCount -
+                  Math.round(
+                    (baseSucc / 100) * latestBenchmark.baselineMetrics.episodesCount
+                  );
+              const candFail =
+                latestBenchmark.candidateMetrics.navigationFailuresCount ??
+                latestBenchmark.candidateMetrics.episodesCount -
+                  Math.round(
+                    (candSucc / 100) * latestBenchmark.candidateMetrics.episodesCount
+                  );
+              const baseReplans = latestBenchmark.baselineMetrics.avgGlobalReplans;
+              const candReplans = latestBenchmark.candidateMetrics.avgGlobalReplans;
+              const baseWait = latestBenchmark.baselineMetrics.avgWaitingTimeSec;
+              const candWait = latestBenchmark.candidateMetrics.avgWaitingTimeSec;
 
-            <p className="text-xs text-slate-200 leading-relaxed bg-slate-900/70 border border-slate-800 rounded-lg p-3.5">
-              {latestBenchmark.overallSummary}
-            </p>
+              const isImproved =
+                candSucc > baseSucc ||
+                (candSucc === baseSucc &&
+                  (candReplans < baseReplans - 0.5 ||
+                    candWait < baseWait - 0.5 ||
+                    latestBenchmark.candidateMetrics.avgCompletionTimeSec <
+                      latestBenchmark.baselineMetrics.avgCompletionTimeSec - 0.5));
+              const isRegressed =
+                candSucc < baseSucc ||
+                latestBenchmark.candidateMetrics.totalCollisions >
+                  latestBenchmark.baselineMetrics.totalCollisions;
 
-            {/* 5 Key Comparison Metrics (Prominent Top Row) */}
-            <div>
-              <div className="text-xs font-semibold text-slate-200 mb-2">
-                5 Core Policy Comparison Metrics (Baseline vs. Trained Candidate Policy)
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
-                {[
-                  {
-                    label: '1. Success Rate',
-                    base: `${latestBenchmark.baselineMetrics.successRatePct}%`,
-                    cand: `${latestBenchmark.candidateMetrics.successRatePct}%`,
-                    delta: `${
-                      latestBenchmark.candidateMetrics.successRatePct -
-                        latestBenchmark.baselineMetrics.successRatePct >=
-                      0
-                        ? '+'
-                        : ''
-                    }${(
-                      latestBenchmark.candidateMetrics.successRatePct -
-                      latestBenchmark.baselineMetrics.successRatePct
-                    ).toFixed(1)}%`,
-                    better:
-                      latestBenchmark.candidateMetrics.successRatePct >=
-                      latestBenchmark.baselineMetrics.successRatePct,
-                  },
-                  {
-                    label: '2. Collision Rate',
-                    base: `${latestBenchmark.baselineMetrics.collisionRatePct}% (${latestBenchmark.baselineMetrics.totalCollisions})`,
-                    cand: `${latestBenchmark.candidateMetrics.collisionRatePct}% (${latestBenchmark.candidateMetrics.totalCollisions})`,
-                    delta: `Δ ${(
-                      latestBenchmark.candidateMetrics.collisionRatePct -
-                      latestBenchmark.baselineMetrics.collisionRatePct
-                    ).toFixed(1)}%`,
-                    better:
-                      latestBenchmark.candidateMetrics.collisionRatePct <=
-                      latestBenchmark.baselineMetrics.collisionRatePct,
-                  },
-                  {
-                    label: '3. Avg Completion Time',
-                    base: `${latestBenchmark.baselineMetrics.avgCompletionTimeSec}s`,
-                    cand: `${latestBenchmark.candidateMetrics.avgCompletionTimeSec}s`,
-                    delta: `Δ ${(
-                      latestBenchmark.candidateMetrics.avgCompletionTimeSec -
-                      latestBenchmark.baselineMetrics.avgCompletionTimeSec
-                    ).toFixed(1)}s`,
-                    better:
-                      latestBenchmark.candidateMetrics.avgCompletionTimeSec <=
-                      latestBenchmark.baselineMetrics.avgCompletionTimeSec,
-                  },
-                  {
-                    label: '4. Navigation Failures',
-                    base: String(
-                      latestBenchmark.baselineMetrics.episodesCount -
-                        Math.round(
-                          (latestBenchmark.baselineMetrics.successRatePct / 100) *
-                            latestBenchmark.baselineMetrics.episodesCount
-                        )
-                    ),
-                    cand: String(
-                      latestBenchmark.candidateMetrics.episodesCount -
-                        Math.round(
-                          (latestBenchmark.candidateMetrics.successRatePct / 100) *
-                            latestBenchmark.candidateMetrics.episodesCount
-                        )
-                    ),
-                    delta: `Deadlocks: ${latestBenchmark.baselineMetrics.totalDeadlocks} → ${latestBenchmark.candidateMetrics.totalDeadlocks}`,
-                    better:
-                      latestBenchmark.candidateMetrics.successRatePct >=
-                      latestBenchmark.baselineMetrics.successRatePct,
-                  },
-                  {
-                    label: '5. Safety Interventions',
-                    base: String(
-                      latestBenchmark.baselineMetrics.totalSafetyInterventions ?? 0
-                    ),
-                    cand: String(
-                      latestBenchmark.candidateMetrics.totalSafetyInterventions ?? 0
-                    ),
-                    delta: `Δ ${
-                      (latestBenchmark.candidateMetrics.totalSafetyInterventions ?? 0) -
-                      (latestBenchmark.baselineMetrics.totalSafetyInterventions ?? 0)
-                    }`,
-                    better:
-                      (latestBenchmark.candidateMetrics.totalSafetyInterventions ?? 0) <=
-                      (latestBenchmark.baselineMetrics.totalSafetyInterventions ?? 0),
-                  },
-                ].map((card) => (
-                  <div
-                    key={card.label}
-                    className="p-3.5 rounded-xl bg-slate-900/90 border border-cyan-500/30 space-y-1.5"
-                  >
-                    <span className="text-slate-300 font-semibold block text-xs">
-                      {card.label}
-                    </span>
-                    <div className="flex items-baseline justify-between font-mono pt-0.5">
-                      <span className="text-slate-400 text-xs">
-                        Base: {card.base}
-                      </span>
-                      <span className="text-cyan-300 font-bold text-sm">
-                        Trained: {card.cand}
-                      </span>
+              return (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-mono text-cyan-400">
+                        BENCHMARK SUITE #{latestBenchmark.id} · {latestBenchmark.timestamp}
+                      </div>
+                      <h3 className="font-display font-semibold text-lg text-slate-100">
+                        Side-by-Side Held-Out Policy Verification Summary
+                      </h3>
                     </div>
-                    <div
-                      className={`text-[11px] font-mono font-semibold ${
-                        card.better ? 'text-emerald-400' : 'text-amber-400'
+
+                    <span
+                      className={`px-3 py-1 rounded-lg font-mono text-xs font-bold border ${
+                        isImproved
+                          ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                          : isRegressed
+                          ? 'bg-rose-500/15 border-rose-500/40 text-rose-300'
+                          : 'bg-amber-500/15 border-amber-500/40 text-amber-300'
                       }`}
                     >
-                      {card.delta}
+                      {isImproved
+                        ? 'VERDICT: CANDIDATE POLICY IMPROVED OVER BASELINE'
+                        : isRegressed
+                        ? 'VERDICT: CANDIDATE POLICY REGRESSED VS BASELINE'
+                        : 'VERDICT: PERFORMANCE UNCHANGED'}
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-slate-200 leading-relaxed bg-slate-900/70 border border-slate-800 rounded-lg p-3.5">
+                    {latestBenchmark.overallSummary}
+                  </p>
+
+                  {/* 7 Required Core Policy Comparison Metrics */}
+                  <div>
+                    <div className="text-xs font-semibold text-slate-200 mb-2">
+                      7 Core Policy Comparison Metrics (Held-Out Scenarios Excluded from Training)
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2.5 text-xs">
+                      {[
+                        {
+                          label: '1. Delivery Success Rate',
+                          base: `${baseSucc}%`,
+                          cand: `${candSucc}%`,
+                          delta: `${candSucc - baseSucc >= 0 ? '+' : ''}${(
+                            candSucc - baseSucc
+                          ).toFixed(1)}%`,
+                          better: candSucc >= baseSucc,
+                        },
+                        {
+                          label: '2. Completion Time',
+                          base: `${latestBenchmark.baselineMetrics.avgCompletionTimeSec}s`,
+                          cand: `${latestBenchmark.candidateMetrics.avgCompletionTimeSec}s`,
+                          delta: `Δ ${(
+                            latestBenchmark.candidateMetrics.avgCompletionTimeSec -
+                            latestBenchmark.baselineMetrics.avgCompletionTimeSec
+                          ).toFixed(1)}s`,
+                          better:
+                            latestBenchmark.candidateMetrics.avgCompletionTimeSec <=
+                            latestBenchmark.baselineMetrics.avgCompletionTimeSec,
+                        },
+                        {
+                          label: '3. Navigation Failures',
+                          base: `${baseFail}`,
+                          cand: `${candFail}`,
+                          delta: `Deadlocks: ${latestBenchmark.baselineMetrics.totalDeadlocks} → ${latestBenchmark.candidateMetrics.totalDeadlocks}`,
+                          better: candFail <= baseFail,
+                        },
+                        {
+                          label: '4. Collisions',
+                          base: `${latestBenchmark.baselineMetrics.totalCollisions} (${latestBenchmark.baselineMetrics.collisionRatePct}%)`,
+                          cand: `${latestBenchmark.candidateMetrics.totalCollisions} (${latestBenchmark.candidateMetrics.collisionRatePct}%)`,
+                          delta: `Δ ${
+                            latestBenchmark.candidateMetrics.totalCollisions -
+                            latestBenchmark.baselineMetrics.totalCollisions
+                          }`,
+                          better:
+                            latestBenchmark.candidateMetrics.totalCollisions <=
+                            latestBenchmark.baselineMetrics.totalCollisions,
+                        },
+                        {
+                          label: '5. Global Replans',
+                          base: `${baseReplans}/run`,
+                          cand: `${candReplans}/run`,
+                          delta: `Δ ${(candReplans - baseReplans).toFixed(1)}/run`,
+                          better: candReplans <= baseReplans,
+                        },
+                        {
+                          label: '6. Waiting Time',
+                          base: `${baseWait}s`,
+                          cand: `${candWait}s`,
+                          delta: `Δ ${(candWait - baseWait).toFixed(1)}s`,
+                          better: candWait <= baseWait,
+                        },
+                        {
+                          label: '7. Safety Interventions',
+                          base: String(
+                            latestBenchmark.baselineMetrics.totalSafetyInterventions ?? 0
+                          ),
+                          cand: String(
+                            latestBenchmark.candidateMetrics.totalSafetyInterventions ?? 0
+                          ),
+                          delta: `Δ ${
+                            (latestBenchmark.candidateMetrics.totalSafetyInterventions ?? 0) -
+                            (latestBenchmark.baselineMetrics.totalSafetyInterventions ?? 0)
+                          }`,
+                          better:
+                            (latestBenchmark.candidateMetrics.totalSafetyInterventions ?? 0) <=
+                            (latestBenchmark.baselineMetrics.totalSafetyInterventions ?? 0),
+                        },
+                      ].map((card) => (
+                        <div
+                          key={card.label}
+                          className="p-3 rounded-xl bg-slate-900/90 border border-cyan-500/30 space-y-1.5"
+                        >
+                          <span className="text-slate-300 font-semibold block text-[11px]">
+                            {card.label}
+                          </span>
+                          <div className="space-y-0.5 font-mono pt-0.5">
+                            <div className="text-slate-400 text-[11px]">
+                              Base: <span className="text-slate-200">{card.base}</span>
+                            </div>
+                            <div className="text-cyan-300 font-bold text-xs">
+                              Cand: {card.cand}
+                            </div>
+                          </div>
+                          <div
+                            className={`text-[10px] font-mono font-semibold ${
+                              card.better ? 'text-emerald-400' : 'text-amber-400'
+                            }`}
+                          >
+                            {card.delta}
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                ))}
-              </div>
-            </div>
+                </>
+              );
+            })()}
 
             {/* Complete 10-Metric Breakdown */}
             <div className="text-xs font-semibold text-slate-400 pt-1">
@@ -1208,6 +1278,7 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
                     <th className="py-3 px-3 text-right">Global Replans</th>
                     <th className="py-3 px-3 text-right">Unnecessary Replans</th>
                     <th className="py-3 px-3 text-right">Wait Time (s)</th>
+                    <th className="py-3 px-3 text-right">Safety Stops</th>
                     <th className="py-3 px-3 text-right">Collisions</th>
                     <th className="py-3 px-3 text-right">Reward</th>
                     <th className="py-3 px-4 text-right">Action</th>
@@ -1252,6 +1323,9 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
                         </td>
                         <td className="py-2.5 px-3 text-right text-slate-300">
                           {comp.baseline.waitingTimeSec.toFixed(1)}s
+                        </td>
+                        <td className="py-2.5 px-3 text-right text-amber-300">
+                          {comp.baseline.safetyInterventions ?? 0}
                         </td>
                         <td className="py-2.5 px-3 text-right text-slate-300">
                           {comp.baseline.collisions}
@@ -1301,6 +1375,9 @@ export const PolicyBenchmarkingPage: React.FC<PolicyBenchmarkingPageProps> = ({
                         </td>
                         <td className="py-2.5 px-3 text-right text-cyan-300">
                           {comp.candidate.waitingTimeSec.toFixed(1)}s
+                        </td>
+                        <td className="py-2.5 px-3 text-right text-cyan-300">
+                          {comp.candidate.safetyInterventions ?? 0}
                         </td>
                         <td className="py-2.5 px-3 text-right text-emerald-400">
                           {comp.candidate.collisions}
