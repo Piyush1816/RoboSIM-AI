@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Sidebar } from './components/layout/Sidebar';
 import { TopNavBar } from './components/layout/TopNavBar';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -31,7 +31,13 @@ import {
 } from './types/simulation';
 
 function RoboSimWorkspace() {
-  const { user, isAuthReady, isGuestWorkspace, showWelcomePage } = useAuth();
+  const {
+    user,
+    isAuthReady,
+    isWorkspaceLoading,
+    isGuestWorkspace,
+    showWelcomePage,
+  } = useAuth();
   const [activePage, setActivePage] = useState<NavPageId>('overview');
 
   // Single Source of Truth from Centralized Experiment Store
@@ -91,6 +97,35 @@ function RoboSimWorkspace() {
   });
 
   const [logs, setLogs] = useState<SimulationLogEntry[]>([]);
+
+  // Reset transient in-memory UI and telemetry state whenever the active account or guest mode changes
+  useEffect(() => {
+    setActivePage('overview');
+    setSelectedScenarioId('scen-construction-detour');
+    setLogs([]);
+    setTelemetry({
+      simulationState: 'idle',
+      robotId: activeRobot.id,
+      robotName: activeRobot.name,
+      robotStatus: 'Standby',
+      environmentId: activeEnvironment.id,
+      environmentName: activeEnvironment.name,
+      originName: 'Robotics Lab North Dock',
+      currentDestination: 'Hostel A Courtyard Locker (HST-N1)',
+      batteryLevelPct: 98.0,
+      currentSpeedMps: 0.0,
+      navigationStatus: 'Ready at ENG-D1',
+      distanceRemainingM: 76.4,
+      distanceTraveledM: 0.0,
+      elapsedTimeSec: 0.0,
+      collisionsCount: 0,
+      replanCount: 0,
+      position: { x: -15, z: -20, headingRad: 0 },
+      activeWaypointIndex: 0,
+      totalWaypoints: 18,
+      selectedBuildingName: null,
+    });
+  }, [user?.uid, isGuestWorkspace, activeRobot.id, activeRobot.name, activeEnvironment.id, activeEnvironment.name]);
 
   const activeScenario = useMemo(
     () => scenarios.find((s) => s.id === selectedScenarioId) ?? scenarios[0],
@@ -246,7 +281,21 @@ function RoboSimWorkspace() {
     [updatePolicies]
   );
 
-  if (isAuthReady && ((!user && !isGuestWorkspace) || showWelcomePage)) {
+  if (!isAuthReady || isWorkspaceLoading) {
+    return (
+      <div className="h-screen w-screen bg-[#070b14] text-slate-100 flex flex-col items-center justify-center gap-3">
+        <div className="w-8 h-8 rounded-full border-2 border-cyan-500/30 border-t-cyan-400 animate-spin" />
+        <div className="text-sm font-medium text-slate-200">
+          Loading isolated RoboSim AI workspace...
+        </div>
+        <div className="text-xs text-slate-400 font-mono">
+          {user?.email ? `Account: ${user.email}` : 'Verifying authentication session'}
+        </div>
+      </div>
+    );
+  }
+
+  if ((!user && !isGuestWorkspace) || showWelcomePage) {
     return <WelcomeAuthPage />;
   }
 

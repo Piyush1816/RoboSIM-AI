@@ -90,7 +90,16 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   activePolicyVersion,
   onQuickOpenSimLab,
 }) => {
-  const { user, logout, openWelcomeScreen } = useAuth();
+  const {
+    user,
+    logout,
+    openWelcomeScreen,
+    workspaceSessionMode,
+    cloudSyncStatus,
+    isSyncingCloud,
+    syncWorkspaceNow,
+    activeFirebaseProjectId,
+  } = useAuth();
   const pageMeta = PAGE_TITLES[activePage] ?? PAGE_TITLES.overview;
 
   const simStatusMeta =
@@ -176,25 +185,65 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
               <>
                 <div
                   className="w-7 h-7 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shrink-0"
-                  title={`${user.displayName || 'Researcher'} (${user.email || 'Cloud Synced'})`}
+                  title={`${user.displayName || 'Researcher'} (${
+                    user.email || user.uid
+                  }) · Project: ${activeFirebaseProjectId}`}
                 >
                   <User className="w-3.5 h-3.5" />
                 </div>
                 <div
-                  className="hidden md:block text-left max-w-[140px] lg:max-w-[180px]"
-                  title={`${user.displayName || 'Researcher'} — ${user.email || 'Cloud Synced'}`}
+                  className="hidden md:block text-left max-w-[165px] lg:max-w-[215px]"
+                  title={
+                    workspaceSessionMode === 'authenticated-offline-pending'
+                      ? `${user.email || 'Account'} — Offline / Pending Sync (${
+                          cloudSyncStatus.pendingCategories.length
+                        } pending)`
+                      : `${user.displayName || 'Researcher'} (${
+                          user.email || 'Authenticated'
+                        }) — Cloud Workspace (${activeFirebaseProjectId})`
+                  }
                 >
                   <div className="text-xs font-medium text-slate-200 leading-none truncate">
-                    {user.displayName || user.email?.split('@')[0] || 'Researcher'}
+                    {user.displayName || user.email || 'Researcher'}
                   </div>
-                  <div className="text-[10px] text-emerald-400 mt-0.5 font-mono flex items-center gap-1">
-                    <Cloud className="w-2.5 h-2.5 shrink-0" />
-                    <span className="truncate">Cloud Synced</span>
-                  </div>
+                  {workspaceSessionMode === 'authenticated-offline-pending' ? (
+                    <button
+                      type="button"
+                      onClick={() => void syncWorkspaceNow()}
+                      className="text-[10px] text-amber-400 hover:text-amber-300 mt-0.5 font-mono flex items-center gap-1 cursor-pointer"
+                      title={
+                        cloudSyncStatus.lastError ||
+                        `Offline or pending synchronization (${cloudSyncStatus.pendingCategories.join(
+                          ', '
+                        )}). Click to retry sync.`
+                      }
+                    >
+                      <Cloud className="w-2.5 h-2.5 shrink-0" />
+                      <span className="truncate">
+                        {isSyncingCloud
+                          ? 'Syncing...'
+                          : !cloudSyncStatus.isOnline
+                          ? 'Offline · Pending Sync'
+                          : `Pending Sync (${cloudSyncStatus.pendingCategories.length})`}
+                      </span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void syncWorkspaceNow()}
+                      className="text-[10px] text-emerald-400 hover:text-emerald-300 mt-0.5 font-mono flex items-center gap-1 cursor-pointer"
+                      title={`Authenticated / Cloud Workspace (${activeFirebaseProjectId}) · Binary map files stored in Browser IndexedDB. Click to sync now.`}
+                    >
+                      <Cloud className="w-2.5 h-2.5 shrink-0" />
+                      <span className="truncate">
+                        {isSyncingCloud ? 'Syncing Cloud...' : 'Cloud Workspace'}
+                      </span>
+                    </button>
+                  )}
                 </div>
                 <button
                   onClick={() => void logout()}
-                  title="Sign out of workspace"
+                  title="Sign out of Cloud Workspace (local data is preserved)"
                   className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-rose-300 transition-colors cursor-pointer shrink-0"
                 >
                   <LogOut className="w-3.5 h-3.5" />
@@ -204,14 +253,16 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
               <>
                 <div
                   className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300 whitespace-nowrap"
-                  title="Local Workspace — Browser Storage"
+                  title="Guest / Local Workspace — Structured data saved in localStorage, map/3D files saved in Browser IndexedDB"
                 >
                   <HardDrive className="w-3 h-3 text-cyan-400 shrink-0" />
-                  <span className="font-medium text-slate-200">Local Workspace</span>
+                  <span className="font-medium text-slate-200">
+                    Guest / Local Workspace
+                  </span>
                 </div>
                 <button
                   onClick={openWelcomeScreen}
-                  title="Sign in or configure Cloud Sync"
+                  title={`Sign in to Firebase Cloud Workspace (${activeFirebaseProjectId})`}
                   className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-cyan-300 text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <LogIn className="w-3.5 h-3.5 shrink-0" />

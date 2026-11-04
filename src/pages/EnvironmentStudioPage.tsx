@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -6,6 +6,7 @@ import {
   Download,
   FileUp,
   Grid,
+  HardDrive,
   Layers,
   MapPin,
   Maximize2,
@@ -20,6 +21,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import {
   BUILTIN_ENVIRONMENTS,
   createEnvironmentFromTemplate,
@@ -33,9 +35,15 @@ import {
 } from '../simulation/environmentValidator';
 import { useExperimentStore } from '../storage/ExperimentContext';
 import {
+  formatBytes,
+  localEnvironmentFileStorage,
+  ResolvedLocalEnvironmentFile,
+} from '../storage/localFileStorage';
+import {
   EnvironmentDefinition,
   EnvironmentElementType,
   EnvironmentTemplateType,
+  LocalEnvironmentFileRef,
   MapElement2D,
   NavPageId,
 } from '../types/simulation';
@@ -164,6 +172,7 @@ const ELEMENT_PALETTE: {
 export const EnvironmentStudioPage: React.FC<EnvironmentStudioPageProps> = ({
   onNavigate,
 }) => {
+  const { user } = useAuth();
   const {
     environments,
     activeEnvironment,
@@ -190,6 +199,12 @@ export const EnvironmentStudioPage: React.FC<EnvironmentStudioPageProps> = ({
   const [showGrid, setShowGrid] = useState<boolean>(true);
   const [snapToGrid, setSnapToGrid] = useState<boolean>(true);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [localFileResolution, setLocalFileResolution] =
+    useState<ResolvedLocalEnvironmentFile | null>(null);
+  const [envLocalFiles, setEnvLocalFiles] = useState<LocalEnvironmentFileRef[]>(
+    []
+  );
 
   // Import modal state
   const [showImportModal, setShowImportModal] = useState<boolean>(false);
@@ -552,34 +567,137 @@ export const EnvironmentStudioPage: React.FC<EnvironmentStudioPageProps> = ({
     setActiveFloor(nextFloorNum);
   };
 
-  // File Import Handlers
+  const refreshEnvironmentLocalFiles = useCallback(
+    async (env: EnvironmentDefinition) => {
+      const files = await localEnvironmentFileStorage.listFilesForEnvironment(
+        env.id,
+        user?.uid
+      );
+      // Merge with any references saved in env.importedMap.localAssets
+      const byId = new Map<string, LocalEnvironmentFileRef>();
+      for (const f of files) {
+        byId.set(f.localFileId, f);
+      }
+      if (env.importedMap?.localFileRef) {
+        if (!byId.has(env.importedMap.localFileRef.localFileId)) {
+          byId.set(
+            env.importedMap.localFileRef.localFileId,
+            env.importedMap.localFileRef
+          );
+        }
+      }
+      if (Array.isArray(env.importedMap?.localAssets)) {
+        for (const asset of env.importedMap.localAssets) {
+          if (asset && asset.localFileId && !byId.has(asset.localFileId)) {
+            byId.set(asset.localFileId, asset);
+          }
+        }
+      }
+      setEnvLocalFiles(Array.from(byId.values()));
+
+      const primaryRef = env.importedMap?.localFileRef;
+      if (!primaryRef) {
+        setLocalFileResolution(null);
+        return;
+      }
+
+      const resolved = await localEnvironmentFileStorage.getFile(
+        primaryRef,
+        user?.uid
+      );
+      setLocalFileResolution(resolved);
+
+      if (resolved.status === 'available') {
+        if (resolved.dataUrl && !env.importedMap?.imageDataUrl) {
+          setDraftEnv((prev) => {
+            if (prev.id !== env.id || !prev.importedMap) return prev;
+            return {
+              ...prev,
+              importedMap: {
+                ...prev.importedMap,
+                imageDataUrl: resolved.dataUrl,
+              },
+            };
+          });
+        } else if (resolved.objectUrl && !env.importedMap?.modelDataUrl) {
+          setDraftEnv((prev) => {
+            if (prev.id !== env.id || !prev.importedMap) return prev;
+            return {
+              ...prev,
+              importedMap: {
+                ...prev.importedMap,
+                modelDataUrl: resolved.objectUrl,
+              },
+            };
+          });
+        }
+      }
+    },
+    [user?.uid]
+  );
+
+  useEffect(() => {
+    void refreshEnvironmentLocalFiles(draftEnv);
+  }, [
+    draftEnv.id,
+    draftEnv.importedMap?.localFileRef?.localFileId,
+    refreshEnvironmentLocalFiles,
+  ]);
+
+  // File Import Handlers (Backed by Browser IndexedDB on Firebase Spark Plan)
   const handleFloorplanFileUpload = async (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const dataUrl = String(reader.result || '');
+    setErrorBanner(null);
+
+    const category =
+      importTab === 'ros' ? 'ros-occupancy-image' : 'floorplan-image';
+    const validation = localEnvironmentFileStorage.validateFile(file, category);
+    if (!validation.valid) {
+      setErrorBanner(validation.error || 'Invalid floor plan image file.');
+      return;
+    }
+
+    try {
+      const saved = await localEnvironmentFileStorage.saveFile({
+        file,
+        category,
+        environmentId: draftEnv.id,
+        ownerUid: user?.uid ?? 'local-workspace',
+      });
+
+      const dataUrl = saved.dataUrl || '';
       let extractedWalls: MapElement2D[] = [];
-      if (autoExtractDarkWalls) {
+      if (autoExtractDarkWalls && dataUrl) {
         extractedWalls = await extractWallsFromFloorplanImage(
           dataUrl,
           calibratedWidthM,
           calibratedDepthM
         );
       }
+
+      const existingAssets = draftEnv.importedMap?.localAssets ?? [];
+      const updatedAssets = [
+        saved.ref,
+        ...existingAssets.filter((a) => a.localFileId !== saved.ref.localFileId),
+      ];
+
       const nextEnv = syncEnvironmentDerivedStructures({
         ...draftEnv,
         widthM: calibratedWidthM,
         depthM: calibratedDepthM,
         importedMap: {
+          ...draftEnv.importedMap,
           sourceType:
             importTab === 'ros' ? 'ros-occupancy' : 'floorplan-image',
           fileName: file.name,
           importedAt: new Date().toISOString(),
           imageDataUrl: dataUrl,
           metersPerPixel: Number((calibratedWidthM / 1000).toFixed(4)),
+          localFileRef: saved.ref,
+          localAssets: updatedAssets,
         },
         elements: [
           ...draftEnv.elements.filter((el) => !el.id.startsWith('imp-wall-')),
@@ -587,87 +705,314 @@ export const EnvironmentStudioPage: React.FC<EnvironmentStudioPageProps> = ({
         ],
       });
       setDraftEnv(nextEnv);
+      saveEnvironmentProfile(nextEnv);
+      setLocalFileResolution(saved);
+      await refreshEnvironmentLocalFiles(nextEnv);
       setShowImportModal(false);
       setStatusBanner(
-        `Imported "${file.name}" (${calibratedWidthM}m × ${calibratedDepthM}m)${
+        `Saved "${file.name}" (${formatBytes(
+          saved.ref.sizeBytes
+        )}) to Browser IndexedDB and overlaid on "${nextEnv.name}" (${calibratedWidthM}m × ${calibratedDepthM}m)${
           extractedWalls.length > 0
-            ? ` and auto-extracted ${extractedWalls.length} physical wall segments.`
+            ? ` with ${extractedWalls.length} extracted wall segments.`
             : '.'
         }`
       );
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleApplyRosYaml = () => {
-    const parsed = parseRosMapYaml(rosYamlText);
-    const estWidth = Math.max(40, Math.min(200, Math.round(Math.abs(parsed.origin[0]) * 2)));
-    const estDepth = Math.max(40, Math.min(200, Math.round(Math.abs(parsed.origin[1]) * 2)));
-    setCalibratedWidthM(estWidth);
-    setCalibratedDepthM(estDepth);
-    setDraftEnv((prev) =>
-      syncEnvironmentDerivedStructures({
-        ...prev,
-        widthM: estWidth,
-        depthM: estDepth,
-        importedMap: {
-          sourceType: 'ros-occupancy',
-          fileName: parsed.imageName || 'ros_map.yaml',
-          importedAt: new Date().toISOString(),
-          rosResolution: parsed.resolution,
-          occupiedThreshold: parsed.occupiedThresh,
-          freeThreshold: parsed.freeThresh,
-          originWorld: [parsed.origin[0], parsed.origin[1]],
-          imageDataUrl: prev.importedMap?.imageDataUrl,
-        },
-      })
-    );
-    setStatusBanner(
-      `Applied ROS YAML configuration (resolution: ${parsed.resolution}m/px, bounds: ${estWidth}m × ${estDepth}m).`
-    );
-  };
-
-  const handleApplyGeoJson = () => {
-    const elements = parseGeoJsonToMapElements(geoJsonText);
-    if (elements.length === 0) {
-      setStatusBanner('No valid Polygon or Point features found in GeoJSON.');
-      return;
+    } catch (err) {
+      setErrorBanner(
+        err instanceof Error
+          ? err.message
+          : 'Failed to store floor plan in IndexedDB.'
+      );
     }
-    setDraftEnv((prev) =>
-      syncEnvironmentDerivedStructures({
-        ...prev,
-        importedMap: {
-          sourceType: 'geojson',
-          fileName: 'imported_features.geojson',
-          importedAt: new Date().toISOString(),
-        },
-        elements: [...prev.elements, ...elements],
-      })
-    );
-    setShowImportModal(false);
-    setStatusBanner(
-      `Imported ${elements.length} physical map features from GeoJSON.`
-    );
   };
 
-  const handleGltfFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleRosYamlFileUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const objectUrl = URL.createObjectURL(file);
-    setDraftEnv((prev) =>
-      syncEnvironmentDerivedStructures({
+    setErrorBanner(null);
+
+    const validation = localEnvironmentFileStorage.validateFile(
+      file,
+      'ros-yaml'
+    );
+    if (!validation.valid) {
+      setErrorBanner(validation.error || 'Invalid ROS YAML file.');
+      return;
+    }
+
+    try {
+      const saved = await localEnvironmentFileStorage.saveFile({
+        file,
+        category: 'ros-yaml',
+        environmentId: draftEnv.id,
+        ownerUid: user?.uid ?? 'local-workspace',
+      });
+      const text = saved.textContent || (await file.text());
+      setRosYamlText(text);
+      const existingAssets = draftEnv.importedMap?.localAssets ?? [];
+      setDraftEnv((prev) => ({
         ...prev,
         importedMap: {
+          sourceType: 'ros-occupancy',
+          fileName: file.name,
+          importedAt: new Date().toISOString(),
+          ...prev.importedMap,
+          rosYamlContent: text,
+          localAssets: [
+            saved.ref,
+            ...existingAssets.filter(
+              (a) => a.localFileId !== saved.ref.localFileId
+            ),
+          ],
+        },
+      }));
+      await refreshEnvironmentLocalFiles(draftEnv);
+      setStatusBanner(
+        `Loaded ROS YAML file "${file.name}" and saved in Browser IndexedDB.`
+      );
+    } catch (err) {
+      setErrorBanner(
+        err instanceof Error ? err.message : 'Failed to read ROS YAML file.'
+      );
+    }
+  };
+
+  const handleApplyRosYaml = async () => {
+    setErrorBanner(null);
+    const parsed = parseRosMapYaml(rosYamlText);
+    const estWidth = Math.max(
+      40,
+      Math.min(200, Math.round(Math.abs(parsed.origin[0]) * 2))
+    );
+    const estDepth = Math.max(
+      40,
+      Math.min(200, Math.round(Math.abs(parsed.origin[1]) * 2))
+    );
+    setCalibratedWidthM(estWidth);
+    setCalibratedDepthM(estDepth);
+
+    const yamlFile = new File(
+      [rosYamlText],
+      parsed.imageName
+        ? `${parsed.imageName.replace(/\.[^.]+$/, '')}.yaml`
+        : 'ros_map.yaml',
+      { type: 'text/yaml' }
+    );
+    let yamlRef: LocalEnvironmentFileRef | undefined;
+    try {
+      const savedYaml = await localEnvironmentFileStorage.saveFile({
+        file: yamlFile,
+        category: 'ros-yaml',
+        environmentId: draftEnv.id,
+        ownerUid: user?.uid ?? 'local-workspace',
+      });
+      yamlRef = savedYaml.ref;
+    } catch {
+      // ignore if IndexedDB unavailable
+    }
+
+    const existingAssets = draftEnv.importedMap?.localAssets ?? [];
+    const updatedAssets = yamlRef
+      ? [
+          yamlRef,
+          ...existingAssets.filter((a) => a.localFileId !== yamlRef!.localFileId),
+        ]
+      : existingAssets;
+
+    const nextEnv = syncEnvironmentDerivedStructures({
+      ...draftEnv,
+      widthM: estWidth,
+      depthM: estDepth,
+      importedMap: {
+        ...draftEnv.importedMap,
+        sourceType: 'ros-occupancy',
+        fileName: parsed.imageName || 'ros_map.yaml',
+        importedAt: new Date().toISOString(),
+        rosResolution: parsed.resolution,
+        occupiedThreshold: parsed.occupiedThresh,
+        freeThreshold: parsed.freeThresh,
+        originWorld: [parsed.origin[0], parsed.origin[1]],
+        rosYamlContent: rosYamlText,
+        imageDataUrl: draftEnv.importedMap?.imageDataUrl,
+        localFileRef: draftEnv.importedMap?.localFileRef ?? yamlRef,
+        localAssets: updatedAssets,
+      },
+    });
+    setDraftEnv(nextEnv);
+    saveEnvironmentProfile(nextEnv);
+    await refreshEnvironmentLocalFiles(nextEnv);
+    setStatusBanner(
+      `Applied ROS YAML configuration (resolution: ${parsed.resolution}m/px, bounds: ${estWidth}m × ${estDepth}m) and stored metadata in IndexedDB.`
+    );
+  };
+
+  const handleApplyGeoJson = async () => {
+    setErrorBanner(null);
+    const elements = parseGeoJsonToMapElements(geoJsonText);
+    if (elements.length === 0) {
+      setErrorBanner('No valid Polygon or Point features found in GeoJSON.');
+      return;
+    }
+
+    const geoFile = new File([geoJsonText], 'imported_features.geojson', {
+      type: 'application/geo+json',
+    });
+    let geoRef: LocalEnvironmentFileRef | undefined;
+    try {
+      const savedGeo = await localEnvironmentFileStorage.saveFile({
+        file: geoFile,
+        category: 'geojson',
+        environmentId: draftEnv.id,
+        ownerUid: user?.uid ?? 'local-workspace',
+      });
+      geoRef = savedGeo.ref;
+    } catch {
+      // ignore
+    }
+
+    const existingAssets = draftEnv.importedMap?.localAssets ?? [];
+    const updatedAssets = geoRef
+      ? [
+          geoRef,
+          ...existingAssets.filter((a) => a.localFileId !== geoRef!.localFileId),
+        ]
+      : existingAssets;
+
+    const nextEnv = syncEnvironmentDerivedStructures({
+      ...draftEnv,
+      importedMap: {
+        ...draftEnv.importedMap,
+        sourceType: 'geojson',
+        fileName: 'imported_features.geojson',
+        importedAt: new Date().toISOString(),
+        localFileRef: draftEnv.importedMap?.localFileRef ?? geoRef,
+        localAssets: updatedAssets,
+      },
+      elements: [...draftEnv.elements, ...elements],
+    });
+    setDraftEnv(nextEnv);
+    saveEnvironmentProfile(nextEnv);
+    await refreshEnvironmentLocalFiles(nextEnv);
+    setShowImportModal(false);
+    setStatusBanner(
+      `Imported ${elements.length} physical map features from GeoJSON and saved source file in Browser IndexedDB.`
+    );
+  };
+
+  const handleGltfFileUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setErrorBanner(null);
+
+    const validation = localEnvironmentFileStorage.validateFile(
+      file,
+      'gltf-3d'
+    );
+    if (!validation.valid) {
+      setErrorBanner(validation.error || 'Invalid GLB/GLTF file.');
+      return;
+    }
+
+    try {
+      const saved = await localEnvironmentFileStorage.saveFile({
+        file,
+        category: 'gltf-3d',
+        environmentId: draftEnv.id,
+        ownerUid: user?.uid ?? 'local-workspace',
+      });
+
+      const existingAssets = draftEnv.importedMap?.localAssets ?? [];
+      const updatedAssets = [
+        saved.ref,
+        ...existingAssets.filter((a) => a.localFileId !== saved.ref.localFileId),
+      ];
+
+      const nextEnv = syncEnvironmentDerivedStructures({
+        ...draftEnv,
+        importedMap: {
+          ...draftEnv.importedMap,
           sourceType: 'gltf-3d',
           fileName: file.name,
           importedAt: new Date().toISOString(),
-          modelDataUrl: objectUrl,
+          modelDataUrl: saved.objectUrl,
+          localFileRef: saved.ref,
+          localAssets: updatedAssets,
         },
-      })
-    );
-    setShowImportModal(false);
+      });
+      setDraftEnv(nextEnv);
+      saveEnvironmentProfile(nextEnv);
+      setLocalFileResolution(saved);
+      await refreshEnvironmentLocalFiles(nextEnv);
+      setShowImportModal(false);
+      setStatusBanner(
+        `Saved 3D asset "${file.name}" (${formatBytes(
+          saved.ref.sizeBytes
+        )}) in Browser IndexedDB and linked to "${nextEnv.name}".`
+      );
+    } catch (err) {
+      setErrorBanner(
+        err instanceof Error
+          ? err.message
+          : 'Failed to store GLB/GLTF asset in IndexedDB.'
+      );
+    }
+  };
+
+  const handleDownloadLocalAsset = async (ref: LocalEnvironmentFileRef) => {
+    setErrorBanner(null);
+    const resolved = await localEnvironmentFileStorage.getFile(ref, user?.uid);
+    if (resolved.status !== 'available' || !resolved.blob) {
+      setErrorBanner(resolved.message);
+      return;
+    }
+    const url = URL.createObjectURL(resolved.blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = ref.fileName;
+    a.click();
+    URL.revokeObjectURL(url);
     setStatusBanner(
-      `Attached 3D asset "${file.name}" to environment. Place 2D walls/destinations to align pathfinding with the 3D mesh.`
+      `Retrieved and downloaded "${ref.fileName}" (${formatBytes(
+        ref.sizeBytes
+      )}) from Browser IndexedDB.`
+    );
+  };
+
+  const handleDeleteLocalAsset = async (ref: LocalEnvironmentFileRef) => {
+    await localEnvironmentFileStorage.deleteFile(ref.localFileId);
+    const isPrimary =
+      draftEnv.importedMap?.localFileRef?.localFileId === ref.localFileId;
+    const remainingAssets = (draftEnv.importedMap?.localAssets ?? []).filter(
+      (a) => a.localFileId !== ref.localFileId
+    );
+    const nextEnv = syncEnvironmentDerivedStructures({
+      ...draftEnv,
+      importedMap: draftEnv.importedMap
+        ? {
+            ...draftEnv.importedMap,
+            imageDataUrl: isPrimary
+              ? undefined
+              : draftEnv.importedMap.imageDataUrl,
+            modelDataUrl: isPrimary
+              ? undefined
+              : draftEnv.importedMap.modelDataUrl,
+            localFileRef: isPrimary
+              ? remainingAssets[0]
+              : draftEnv.importedMap.localFileRef,
+            localAssets: remainingAssets,
+          }
+        : undefined,
+    });
+    setDraftEnv(nextEnv);
+    saveEnvironmentProfile(nextEnv);
+    await refreshEnvironmentLocalFiles(nextEnv);
+    setStatusBanner(
+      `Deleted "${ref.fileName}" from Browser IndexedDB and updated environment references.`
     );
   };
 
@@ -804,6 +1149,45 @@ export const EnvironmentStudioPage: React.FC<EnvironmentStudioPageProps> = ({
               className="text-cyan-400 hover:text-cyan-200 text-xs ml-4 cursor-pointer"
             >
               Dismiss
+            </button>
+          </div>
+        )}
+
+        {errorBanner && (
+          <div className="px-3.5 py-2 rounded-lg bg-rose-950/50 border border-rose-500/40 text-xs text-rose-200 flex items-center justify-between">
+            <span className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>{errorBanner}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setErrorBanner(null)}
+              className="text-rose-300 hover:text-rose-100 text-xs ml-4 cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {localFileResolution && localFileResolution.status !== 'available' && (
+          <div className="px-3.5 py-2.5 rounded-lg bg-amber-950/40 border border-amber-500/40 text-xs text-amber-200 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-semibold text-amber-300">
+                  Device-Local IndexedDB Asset Notice ({localFileResolution.ref.fileName})
+                </div>
+                <div className="text-[11px] text-amber-200/90 mt-0.5">
+                  {localFileResolution.message}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowImportModal(true)}
+              className="px-3 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs cursor-pointer shrink-0"
+            >
+              Re-upload Local File
             </button>
           </div>
         )}
@@ -1385,6 +1769,87 @@ export const EnvironmentStudioPage: React.FC<EnvironmentStudioPageProps> = ({
               </div>
             )}
           </div>
+
+          {/* 5. Local Asset Files (IndexedDB · Firebase Spark Plan) */}
+          <div className="bg-[#0b1120] border border-slate-800 rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                <HardDrive className="w-3.5 h-3.5 text-cyan-400" />
+                <span>5. Local Asset Files (IndexedDB)</span>
+              </h3>
+              <span className="px-2 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/30 font-mono text-[10px] text-cyan-300">
+                Spark Plan · Device-Local
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-[#070b14] border border-slate-800/90 text-[11px] text-slate-400 leading-relaxed">
+              Uploaded binary files (<strong className="text-slate-200">PNG/JPG floor plans, ROS occupancy maps, GLB/GLTF 3D meshes</strong>) are stored locally in this browser&apos;s{' '}
+              <strong className="text-cyan-300">IndexedDB</strong> so your project stays 100% free on the Firebase Spark plan. Environment geometry &amp; file references sync to Firestore, while binary blobs remain specific to this browser/device.
+            </div>
+
+            {envLocalFiles.length === 0 ? (
+              <div className="text-xs text-slate-500 py-2 text-center border border-dashed border-slate-800 rounded-lg">
+                No local binary files attached to &ldquo;{draftEnv.name}&rdquo; yet.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-52 overflow-y-auto">
+                {envLocalFiles.map((fileRef) => {
+                  const isMissing =
+                    localFileResolution?.ref.localFileId ===
+                      fileRef.localFileId &&
+                    localFileResolution.status !== 'available';
+                  return (
+                    <div
+                      key={fileRef.localFileId}
+                      className="p-2.5 rounded-lg bg-[#070b14] border border-slate-800 flex items-center justify-between gap-2 text-xs"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div
+                          className="font-medium text-slate-200 truncate"
+                          title={fileRef.fileName}
+                        >
+                          {fileRef.fileName}
+                        </div>
+                        <div className="text-[10px] text-slate-400 font-mono flex items-center gap-2 mt-0.5">
+                          <span>{fileRef.category}</span>
+                          <span>·</span>
+                          <span>{formatBytes(fileRef.sizeBytes)}</span>
+                          <span>·</span>
+                          <span
+                            className={
+                              isMissing ? 'text-amber-400' : 'text-emerald-400'
+                            }
+                          >
+                            {isMissing
+                              ? 'Missing on this device'
+                              : 'Stored in IndexedDB'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => void handleDownloadLocalAsset(fileRef)}
+                          title="Retrieve & download file from IndexedDB"
+                          className="p-1.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-cyan-300 cursor-pointer"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteLocalAsset(fileRef)}
+                          title="Delete file from IndexedDB"
+                          className="p-1.5 rounded bg-slate-900 hover:bg-rose-950 border border-slate-700 text-rose-300 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1530,23 +1995,34 @@ export const EnvironmentStudioPage: React.FC<EnvironmentStudioPageProps> = ({
                   onChange={(e) => setRosYamlText(e.target.value)}
                   className="w-full p-3 rounded bg-[#070b14] border border-slate-700 font-mono text-xs text-slate-100"
                 />
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <button
                     type="button"
-                    onClick={handleApplyRosYaml}
+                    onClick={() => void handleApplyRosYaml()}
                     className="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold cursor-pointer"
                   >
-                    Parse & Apply ROS YAML Metadata
+                    Parse &amp; Apply ROS YAML Metadata
                   </button>
-                  <label className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer">
-                    <span>Attach Occupancy Image (PNG/PGM)</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleFloorplanFileUpload}
-                      className="hidden"
-                    />
-                  </label>
+                  <div className="flex items-center gap-2">
+                    <label className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer">
+                      <span>Upload .YAML File</span>
+                      <input
+                        type="file"
+                        accept=".yaml,.yml,.txt"
+                        onChange={handleRosYamlFileUpload}
+                        className="hidden"
+                      />
+                    </label>
+                    <label className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer">
+                      <span>Attach Occupancy Image (PNG/PGM)</span>
+                      <input
+                        type="file"
+                        accept="image/*,.pgm"
+                        onChange={handleFloorplanFileUpload}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
                 </div>
               </div>
             )}

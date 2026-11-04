@@ -2,81 +2,131 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     // ===============================================================
-    // Assumed Data Model
+    // RoboSim AI — Hardened Zero-Trust Firestore Security Rules
+    // Target Project: robosim-2db29 | Database: (default)
     // ===============================================================
     //
-    // Collection: /users/{userId}
-    // Document ID: {userId} (matches request.auth.uid)
-    // Fields:
-    //   - uid: string (required, matches userId)
-    //   - email: string (optional)
-    //   - displayName: string (optional, max 120 chars)
-    //   - createdAt: string (optional, max 64 chars)
-    //   - updatedAt: string (required, max 64 chars)
-    //   - selectedRobotId: string (optional, max 120 chars)
-    //   - selectedEnvironmentId: string (optional, max 120 chars)
-    //   - demoPreviewEnabled: bool (optional)
-    //
-    // Collection: /users/{userId}/workspace/{categoryId}
-    // Document ID: {categoryId} (robots | environments | scenarios | policies | candidatePolicy | experiments | failures | benchmarks | robotBenchmarks | fdBatches | preferences)
-    // Fields:
-    //   - uid: string (required, matches userId)
-    //   - category: string (required, max 64 chars)
-    //   - payloadJson: string (required, max 950000 chars)
-    //   - updatedAt: string (required, max 64 chars)
-    //
-    // ===============================================================
+    // 1. Default Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
 
-    function isAuthenticated() {
-      return request.auth != null;
+    // 2. Reusable Security Primitives
+    function isSignedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function isValidId(id) {
+      return id is string &&
+             id.size() >= 1 &&
+             id.size() <= 128 &&
+             id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
     function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+      return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isValidCategoryId(categoryId) {
+      return categoryId in [
+        'robots',
+        'environments',
+        'scenarios',
+        'policies',
+        'candidatePolicy',
+        'trainingStates',
+        'experiments',
+        'failures',
+        'benchmarks',
+        'robotBenchmarks',
+        'fdBatches',
+        'preferences',
+        'settings'
+      ];
+    }
+
+    // 3. Entity Blueprint Validation Helpers
     function isValidUserProfile(data, userId) {
       return data.keys().hasAll(['uid', 'updatedAt']) &&
+             data.keys().hasOnly([
+               'uid',
+               'email',
+               'displayName',
+               'createdAt',
+               'updatedAt',
+               'selectedRobotId',
+               'selectedEnvironmentId',
+               'selectedPolicyId',
+               'demoPreviewEnabled'
+             ]) &&
              data.uid is string &&
              data.uid == userId &&
+             data.uid.size() >= 1 &&
+             data.uid.size() <= 128 &&
              data.updatedAt is string &&
+             data.updatedAt.size() >= 1 &&
              data.updatedAt.size() <= 64 &&
              (!('email' in data) || (data.email is string && data.email.size() <= 254)) &&
              (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 120)) &&
              (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64)) &&
              (!('selectedRobotId' in data) || (data.selectedRobotId is string && data.selectedRobotId.size() <= 120)) &&
              (!('selectedEnvironmentId' in data) || (data.selectedEnvironmentId is string && data.selectedEnvironmentId.size() <= 120)) &&
+             (!('selectedPolicyId' in data) || (data.selectedPolicyId is string && data.selectedPolicyId.size() <= 120)) &&
              (!('demoPreviewEnabled' in data) || data.demoPreviewEnabled is bool);
     }
 
-    function isValidWorkspaceChunk(data, userId) {
+    function isValidWorkspaceChunk(data, userId, categoryId) {
       return data.keys().hasAll(['uid', 'category', 'payloadJson', 'updatedAt']) &&
+             data.keys().hasOnly(['uid', 'category', 'payloadJson', 'updatedAt']) &&
              data.uid is string &&
              data.uid == userId &&
+             data.uid.size() >= 1 &&
+             data.uid.size() <= 128 &&
              data.category is string &&
-             data.category.size() >= 1 &&
-             data.category.size() <= 64 &&
+             data.category == categoryId &&
+             isValidCategoryId(data.category) &&
              data.payloadJson is string &&
+             data.payloadJson.size() >= 1 &&
              data.payloadJson.size() <= 950000 &&
              data.updatedAt is string &&
+             data.updatedAt.size() >= 1 &&
              data.updatedAt.size() <= 64;
     }
 
+    // 4. Isolated Per-User Profile & Workspace Rules
     match /users/{userId} {
-      allow read: if isOwner(userId);
-      allow create: if isOwner(userId) && isValidUserProfile(request.resource.data, userId);
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) &&
+                    isValidId(userId) &&
+                    isValidUserProfile(request.resource.data, userId);
       allow update: if isOwner(userId) &&
+                    isValidId(userId) &&
                     isValidUserProfile(request.resource.data, userId) &&
-                    request.resource.data.uid == resource.data.uid;
-      allow delete: if isOwner(userId);
+                    request.resource.data.uid == resource.data.uid &&
+                    (!('createdAt' in resource.data) ||
+                     request.resource.data.createdAt == resource.data.createdAt);
+      allow delete: if isOwner(userId) && isValidId(userId);
 
       match /workspace/{categoryId} {
-        allow read: if isOwner(userId);
-        allow create: if isOwner(userId) && isValidWorkspaceChunk(request.resource.data, userId);
+        allow get: if isOwner(userId) &&
+                   isValidId(userId) &&
+                   isValidCategoryId(categoryId);
+        allow list: if isOwner(userId) &&
+                    resource.data.uid == request.auth.uid;
+        allow create: if isOwner(userId) &&
+                      isValidId(userId) &&
+                      isValidCategoryId(categoryId) &&
+                      isValidWorkspaceChunk(request.resource.data, userId, categoryId);
         allow update: if isOwner(userId) &&
-                      isValidWorkspaceChunk(request.resource.data, userId) &&
-                      request.resource.data.uid == resource.data.uid;
-        allow delete: if isOwner(userId);
+                      isValidId(userId) &&
+                      isValidCategoryId(categoryId) &&
+                      isValidWorkspaceChunk(request.resource.data, userId, categoryId) &&
+                      request.resource.data.uid == resource.data.uid &&
+                      request.resource.data.category == resource.data.category;
+        allow delete: if isOwner(userId) &&
+                      isValidId(userId) &&
+                      isValidCategoryId(categoryId);
       }
     }
   }

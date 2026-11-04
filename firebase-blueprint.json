@@ -12,13 +12,14 @@
         "updatedAt": { "type": "string", "description": "ISO timestamp when profile was last updated" },
         "selectedRobotId": { "type": "string", "description": "Active robot ID in workspace" },
         "selectedEnvironmentId": { "type": "string", "description": "Active environment ID in workspace" },
+        "selectedPolicyId": { "type": "string", "description": "Active navigation policy ID in workspace" },
         "demoPreviewEnabled": { "type": "boolean", "description": "Whether demo preview records are enabled" }
       },
       "required": ["uid", "updatedAt"]
     },
     "UserWorkspaceChunk": {
       "title": "UserWorkspaceChunk",
-      "description": "Per-user workspace collection chunk storing robots, environments, scenarios, policies, experiments, failures, and benchmarks.",
+      "description": "Per-user workspace collection chunk storing robots, environments, scenarios, policies, training states, experiments, failures, and benchmarks.",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "description": "Owner Firebase Auth UID" },
@@ -30,12 +31,14 @@
             "scenarios",
             "policies",
             "candidatePolicy",
+            "trainingStates",
             "experiments",
             "failures",
             "benchmarks",
             "robotBenchmarks",
             "fdBatches",
-            "preferences"
+            "preferences",
+            "settings"
           ],
           "description": "Workspace data category"
         },

@@ -9,12 +9,16 @@ import {
   syncEnvironmentDerivedStructures,
 } from '../data/environmentTemplates';
 import {
+  getPendingSyncCategories,
   loadAllWorkspaceCategoriesFromCloud,
   saveWorkspaceCategoryToCloud,
+  setActivePendingSyncUserId,
   WorkspaceCategoryKey,
 } from '../firebase/firebaseClient';
+import { localEnvironmentFileStorage } from './localFileStorage';
 import { diagnoseExperimentFailure } from '../simulation/failureIntelligence';
 import { createInitialCandidatePolicyState } from '../simulation/policyLearner';
+import { clearPersistedLabController } from '../three/CampusSceneManager';
 import {
   BenchmarkSuiteResult,
   CandidatePolicyState,
@@ -30,35 +34,166 @@ import {
 } from '../types/simulation';
 
 export const STORAGE_KEYS = {
-  EXPERIMENTS: 'robosim_ai_experiments_v1',
-  FAILURES: 'robosim_ai_failures_v1',
-  SCENARIOS: 'robosim_ai_custom_scenarios_v1',
-  POLICIES: 'robosim_ai_policies_v1',
-  CANDIDATE_POLICY: 'robosim_ai_candidate_qpolicy_v1',
-  BENCHMARKS: 'robosim_ai_benchmarks_v1',
-  ROBOT_BENCHMARKS: 'robosim_ai_robot_benchmarks_v1',
-  FD_BATCHES: 'robosim_ai_fd_batches_v1',
-  DEMO_MODE: 'robosim_ai_demo_mode_v1',
-  ROBOTS: 'robosim_ai_custom_robots_v1',
-  SELECTED_ROBOT_ID: 'robosim_ai_selected_robot_id_v1',
-  ENVIRONMENTS: 'robosim_ai_custom_environments_v1',
-  SELECTED_ENVIRONMENT_ID: 'robosim_ai_selected_environment_id_v1',
-  SELECTED_POLICY_ID: 'robosim_ai_selected_policy_id_v1',
-};
+  EXPERIMENTS: 'experiments_v1',
+  FAILURES: 'failures_v1',
+  SCENARIOS: 'custom_scenarios_v1',
+  POLICIES: 'policies_v1',
+  CANDIDATE_POLICY: 'candidate_qpolicy_v1',
+  BENCHMARKS: 'benchmarks_v1',
+  ROBOT_BENCHMARKS: 'robot_benchmarks_v1',
+  FD_BATCHES: 'fd_batches_v1',
+  DEMO_MODE: 'demo_mode_v1',
+  ROBOTS: 'custom_robots_v1',
+  SELECTED_ROBOT_ID: 'selected_robot_id_v1',
+  ENVIRONMENTS: 'custom_environments_v1',
+  SELECTED_ENVIRONMENT_ID: 'selected_environment_id_v1',
+  SELECTED_POLICY_ID: 'selected_policy_id_v1',
+} as const;
+
+export type WorkspaceScopeMode = 'unauthenticated' | 'guest' | 'user';
+
+const GUEST_SESSION_STORAGE_KEY = 'robosim_ai_guest_session_active_v1';
+
+let activeScopeMode: WorkspaceScopeMode = (() => {
+  try {
+    if (
+      typeof localStorage !== 'undefined' &&
+      localStorage.getItem(GUEST_SESSION_STORAGE_KEY) === 'true'
+    ) {
+      return 'guest';
+    }
+  } catch {
+    // ignore
+  }
+  return 'unauthenticated';
+})();
 
 let activeCloudUid: string | null = null;
 
+export function getScopedStorageKey(
+  baseKey: string,
+  overrideScope?: { mode: WorkspaceScopeMode; uid?: string | null }
+): string | null {
+  const mode = overrideScope ? overrideScope.mode : activeScopeMode;
+  const uid = overrideScope ? overrideScope.uid ?? null : activeCloudUid;
+
+  if (mode === 'user') {
+    if (!uid) return null;
+    return `robosim_workspace_user_${uid}_${baseKey}`;
+  }
+  if (mode === 'guest') {
+    return `robosim_workspace_guest_${baseKey}`;
+  }
+  return null;
+}
+
+export function getActiveWorkspaceScope(): {
+  mode: WorkspaceScopeMode;
+  uid: string | null;
+  namespacePrefix: string | null;
+} {
+  const namespacePrefix =
+    activeScopeMode === 'user' && activeCloudUid
+      ? `robosim_workspace_user_${activeCloudUid}_`
+      : activeScopeMode === 'guest'
+      ? 'robosim_workspace_guest_'
+      : null;
+  return {
+    mode: activeScopeMode,
+    uid: activeCloudUid,
+    namespacePrefix,
+  };
+}
+
+export function setActiveWorkspaceScope(
+  mode: WorkspaceScopeMode,
+  uid: string | null = null
+): void {
+  const normalizedUid = mode === 'user' && uid ? uid.trim() : null;
+  const normalizedMode: WorkspaceScopeMode =
+    mode === 'user' && !normalizedUid ? 'unauthenticated' : mode;
+
+  const changed =
+    activeScopeMode !== normalizedMode || activeCloudUid !== normalizedUid;
+
+  activeScopeMode = normalizedMode;
+  activeCloudUid = normalizedUid;
+  setActivePendingSyncUserId(normalizedUid);
+
+  if (changed) {
+    clearPersistedLabController();
+    notifyStoreSubscribers();
+  }
+}
+
 export function setActiveCloudUserId(uid: string | null): void {
-  activeCloudUid = uid;
+  if (uid && uid.trim()) {
+    setActiveWorkspaceScope('user', uid.trim());
+  } else {
+    let isGuest = false;
+    try {
+      isGuest =
+        typeof localStorage !== 'undefined' &&
+        localStorage.getItem(GUEST_SESSION_STORAGE_KEY) === 'true';
+    } catch {
+      isGuest = false;
+    }
+    setActiveWorkspaceScope(isGuest ? 'guest' : 'unauthenticated', null);
+  }
 }
 
 export function getActiveCloudUserId(): string | null {
   return activeCloudUid;
 }
 
+function readScopedStorageItem(baseKey: string): string | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const scopedKey = getScopedStorageKey(baseKey);
+    if (!scopedKey) return null;
+    return localStorage.getItem(scopedKey);
+  } catch {
+    return null;
+  }
+}
+
+function writeScopedStorageItem(baseKey: string, value: string): boolean {
+  try {
+    if (typeof localStorage === 'undefined') return false;
+    const scopedKey = getScopedStorageKey(baseKey);
+    if (!scopedKey) return false;
+    localStorage.setItem(scopedKey, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeScopedStorageItem(baseKey: string): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const scopedKey = getScopedStorageKey(baseKey);
+    if (!scopedKey) return;
+    localStorage.removeItem(scopedKey);
+  } catch {
+    // ignore
+  }
+}
+
 function triggerCloudSync(category: WorkspaceCategoryKey, payload: unknown): void {
-  if (!activeCloudUid) return;
+  if (activeScopeMode !== 'user' || !activeCloudUid) return;
   void saveWorkspaceCategoryToCloud(activeCloudUid, category, payload);
+}
+
+function triggerSettingsAndPreferencesCloudSync(prefsPayload: {
+  selectedRobotId: string;
+  selectedEnvironmentId: string;
+  selectedPolicyId: string;
+  demoPreviewEnabled: boolean;
+}): void {
+  if (activeScopeMode !== 'user' || !activeCloudUid) return;
+  void saveWorkspaceCategoryToCloud(activeCloudUid, 'preferences', prefsPayload);
+  void saveWorkspaceCategoryToCloud(activeCloudUid, 'settings', prefsPayload);
 }
 
 export const STORE_SYNC_EVENT = 'robosim_ai_store_sync_v1';
@@ -89,7 +224,8 @@ export function subscribeToStoreChanges(callback: () => void): () => void {
 
   const handleCustomEvent = () => callback();
   const handleStorageEvent = (e: StorageEvent) => {
-    if (!e.key || Object.values(STORAGE_KEYS).includes(e.key)) {
+    const { namespacePrefix } = getActiveWorkspaceScope();
+    if (!e.key || (namespacePrefix && e.key.startsWith(namespacePrefix))) {
       callback();
     }
   };
@@ -108,13 +244,12 @@ export function subscribeToStoreChanges(callback: () => void): () => void {
 
 export function loadStoredExperiments(): ExperimentRecord[] {
   try {
-    if (typeof localStorage === 'undefined') return [];
-    const rawExp = localStorage.getItem(STORAGE_KEYS.EXPERIMENTS);
+    const rawExp = readScopedStorageItem(STORAGE_KEYS.EXPERIMENTS);
     const parsedExp: ExperimentRecord[] = rawExp ? JSON.parse(rawExp) : [];
     if (!Array.isArray(parsedExp)) return [];
 
-    // Merge any legacy failure metadata from STORAGE_KEYS.FAILURES into corresponding failed experiments
-    const rawFail = localStorage.getItem(STORAGE_KEYS.FAILURES);
+    // Merge any failure metadata from scoped FAILURES into corresponding failed experiments
+    const rawFail = readScopedStorageItem(STORAGE_KEYS.FAILURES);
     const parsedFail: FailureEventRecord[] = rawFail ? JSON.parse(rawFail) : [];
     const failByExpId = new Map<string, FailureEventRecord>();
     if (Array.isArray(parsedFail)) {
@@ -201,10 +336,9 @@ export function saveStoredExperiment(record: ExperimentRecord): ExperimentRecord
     const current = loadStoredExperiments();
     const filtered = current.filter((item) => item.id !== record.id);
     const updated = [record, ...filtered];
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.EXPERIMENTS, JSON.stringify(updated));
+    if (writeScopedStorageItem(STORAGE_KEYS.EXPERIMENTS, JSON.stringify(updated))) {
       const failureRecords = deriveFailureRecordsFromExperiments(updated);
-      localStorage.setItem(STORAGE_KEYS.FAILURES, JSON.stringify(failureRecords));
+      writeScopedStorageItem(STORAGE_KEYS.FAILURES, JSON.stringify(failureRecords));
       triggerCloudSync('experiments', updated);
       triggerCloudSync('failures', failureRecords);
     }
@@ -223,10 +357,9 @@ export function saveStoredExperimentsBatch(
     const newIds = new Set(records.map((r) => r.id));
     const filtered = current.filter((item) => !newIds.has(item.id));
     const updated = [...records.slice().reverse(), ...filtered];
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.EXPERIMENTS, JSON.stringify(updated));
+    if (writeScopedStorageItem(STORAGE_KEYS.EXPERIMENTS, JSON.stringify(updated))) {
       const failureRecords = deriveFailureRecordsFromExperiments(updated);
-      localStorage.setItem(STORAGE_KEYS.FAILURES, JSON.stringify(failureRecords));
+      writeScopedStorageItem(STORAGE_KEYS.FAILURES, JSON.stringify(failureRecords));
       triggerCloudSync('experiments', updated);
       triggerCloudSync('failures', failureRecords);
     }
@@ -239,10 +372,10 @@ export function saveStoredExperimentsBatch(
 
 export function clearStoredExperiments(): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.removeItem(STORAGE_KEYS.EXPERIMENTS);
-      localStorage.removeItem(STORAGE_KEYS.FAILURES);
-    }
+    removeScopedStorageItem(STORAGE_KEYS.EXPERIMENTS);
+    removeScopedStorageItem(STORAGE_KEYS.FAILURES);
+    triggerCloudSync('experiments', []);
+    triggerCloudSync('failures', []);
     notifyStoreSubscribers();
   } catch {
     // ignore storage errors
@@ -570,8 +703,7 @@ export function getActiveExperimentsList(
 
 export function loadScenarios(): ScenarioConfig[] {
   try {
-    if (typeof localStorage === 'undefined') return DEFAULT_SCENARIOS;
-    const raw = localStorage.getItem(STORAGE_KEYS.SCENARIOS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.SCENARIOS);
     if (!raw) return DEFAULT_SCENARIOS;
     const custom: ScenarioConfig[] = JSON.parse(raw);
     if (!Array.isArray(custom)) return DEFAULT_SCENARIOS;
@@ -585,15 +717,15 @@ export function loadScenarios(): ScenarioConfig[] {
 
 export function saveCustomScenario(scenario: ScenarioConfig): ScenarioConfig[] {
   try {
-    if (typeof localStorage === 'undefined') {
-      return [...DEFAULT_SCENARIOS, scenario];
-    }
-    const raw = localStorage.getItem(STORAGE_KEYS.SCENARIOS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.SCENARIOS);
     const custom: ScenarioConfig[] = raw ? JSON.parse(raw) : [];
-    const filtered = custom.filter((c) => c.id !== scenario.id);
+    const filtered = Array.isArray(custom)
+      ? custom.filter((c) => c.id !== scenario.id)
+      : [];
     const updatedCustom = [...filtered, { ...scenario, isCustom: true }];
-    localStorage.setItem(STORAGE_KEYS.SCENARIOS, JSON.stringify(updatedCustom));
-    triggerCloudSync('scenarios', updatedCustom);
+    if (writeScopedStorageItem(STORAGE_KEYS.SCENARIOS, JSON.stringify(updatedCustom))) {
+      triggerCloudSync('scenarios', updatedCustom);
+    }
     notifyStoreSubscribers();
     return [...DEFAULT_SCENARIOS, ...updatedCustom];
   } catch {
@@ -605,22 +737,20 @@ export function saveCustomScenariosBatch(
   newScenarios: ScenarioConfig[]
 ): ScenarioConfig[] {
   try {
-    if (typeof localStorage === 'undefined') {
-      return [...DEFAULT_SCENARIOS, ...newScenarios];
-    }
-    const raw = localStorage.getItem(STORAGE_KEYS.SCENARIOS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.SCENARIOS);
     const custom: ScenarioConfig[] = raw ? JSON.parse(raw) : [];
     const incomingIds = new Set(newScenarios.map((s) => s.id));
     const incomingNames = new Set(newScenarios.map((s) => s.name));
-    const filtered = custom.filter(
-      (c) => !incomingIds.has(c.id) && !incomingNames.has(c.name)
-    );
+    const filtered = Array.isArray(custom)
+      ? custom.filter((c) => !incomingIds.has(c.id) && !incomingNames.has(c.name))
+      : [];
     const updatedCustom = [
       ...filtered,
       ...newScenarios.map((s) => ({ ...s, isCustom: true })),
     ];
-    localStorage.setItem(STORAGE_KEYS.SCENARIOS, JSON.stringify(updatedCustom));
-    triggerCloudSync('scenarios', updatedCustom);
+    if (writeScopedStorageItem(STORAGE_KEYS.SCENARIOS, JSON.stringify(updatedCustom))) {
+      triggerCloudSync('scenarios', updatedCustom);
+    }
     notifyStoreSubscribers();
     return [...DEFAULT_SCENARIOS, ...updatedCustom];
   } catch {
@@ -632,9 +762,7 @@ export function loadPolicies(): NavigationPolicyConfig[] {
   try {
     const candidateState = loadCandidatePolicyState();
     const activePolId =
-      typeof localStorage !== 'undefined'
-        ? localStorage.getItem(STORAGE_KEYS.SELECTED_POLICY_ID) || 'pol-hybrid-safe'
-        : 'pol-hybrid-safe';
+      readScopedStorageItem(STORAGE_KEYS.SELECTED_POLICY_ID) || 'pol-hybrid-safe';
 
     const syncCandidateMetadata = (list: NavigationPolicyConfig[]): NavigationPolicyConfig[] => {
       const meanReward =
@@ -674,10 +802,7 @@ export function loadPolicies(): NavigationPolicyConfig[] {
       });
     };
 
-    if (typeof localStorage === 'undefined') {
-      return syncCandidateMetadata(NAVIGATION_POLICIES);
-    }
-    const raw = localStorage.getItem(STORAGE_KEYS.POLICIES);
+    const raw = readScopedStorageItem(STORAGE_KEYS.POLICIES);
     if (!raw) return syncCandidateMetadata(NAVIGATION_POLICIES);
     const parsed: NavigationPolicyConfig[] = JSON.parse(raw);
     if (!Array.isArray(parsed) || parsed.length === 0) {
@@ -709,8 +834,7 @@ export function loadPolicies(): NavigationPolicyConfig[] {
 
 export function savePolicies(policies: NavigationPolicyConfig[]): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.POLICIES, JSON.stringify(policies));
+    if (writeScopedStorageItem(STORAGE_KEYS.POLICIES, JSON.stringify(policies))) {
       triggerCloudSync('policies', policies);
     }
     notifyStoreSubscribers();
@@ -721,9 +845,8 @@ export function savePolicies(policies: NavigationPolicyConfig[]): void {
 
 export function loadSelectedPolicyId(): string {
   try {
-    if (typeof localStorage === 'undefined') return 'pol-hybrid-safe';
-    const saved = localStorage.getItem(STORAGE_KEYS.SELECTED_POLICY_ID);
-    const rawPolicies = localStorage.getItem(STORAGE_KEYS.POLICIES);
+    const saved = readScopedStorageItem(STORAGE_KEYS.SELECTED_POLICY_ID);
+    const rawPolicies = readScopedStorageItem(STORAGE_KEYS.POLICIES);
     const list: NavigationPolicyConfig[] = rawPolicies
       ? JSON.parse(rawPolicies)
       : NAVIGATION_POLICIES;
@@ -745,9 +868,8 @@ export function loadSelectedPolicyId(): string {
 
 export function saveSelectedPolicyId(policyId: string): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.SELECTED_POLICY_ID, policyId);
-      const candRaw = localStorage.getItem(STORAGE_KEYS.CANDIDATE_POLICY);
+    if (writeScopedStorageItem(STORAGE_KEYS.SELECTED_POLICY_ID, policyId)) {
+      const candRaw = readScopedStorageItem(STORAGE_KEYS.CANDIDATE_POLICY);
       if (candRaw) {
         const parsedCand = JSON.parse(candRaw) as CandidatePolicyState;
         if (parsedCand && typeof parsedCand === 'object') {
@@ -759,14 +881,15 @@ export function saveSelectedPolicyId(policyId: string): void {
                 ? parsedCand.activatedAt || new Date().toISOString()
                 : parsedCand.activatedAt,
           };
-          localStorage.setItem(
+          writeScopedStorageItem(
             STORAGE_KEYS.CANDIDATE_POLICY,
             JSON.stringify(updatedCand)
           );
           triggerCloudSync('candidatePolicy', updatedCand);
+          triggerCloudSync('trainingStates', updatedCand);
         }
       }
-      triggerCloudSync('preferences', {
+      triggerSettingsAndPreferencesCloudSync({
         selectedRobotId: loadSelectedRobotId(),
         selectedEnvironmentId: loadSelectedEnvironmentId(),
         selectedPolicyId: policyId,
@@ -781,16 +904,13 @@ export function saveSelectedPolicyId(policyId: string): void {
 
 export function loadCandidatePolicyState(): CandidatePolicyState {
   try {
-    if (typeof localStorage === 'undefined') {
-      return createInitialCandidatePolicyState();
-    }
-    const raw = localStorage.getItem(STORAGE_KEYS.CANDIDATE_POLICY);
+    const raw = readScopedStorageItem(STORAGE_KEYS.CANDIDATE_POLICY);
     if (!raw) return createInitialCandidatePolicyState();
     const parsed: CandidatePolicyState = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || !parsed.qTable) {
       return createInitialCandidatePolicyState();
     }
-    const activePolId = localStorage.getItem(STORAGE_KEYS.SELECTED_POLICY_ID);
+    const activePolId = readScopedStorageItem(STORAGE_KEYS.SELECTED_POLICY_ID);
     return {
       ...parsed,
       isActive:
@@ -805,9 +925,9 @@ export function loadCandidatePolicyState(): CandidatePolicyState {
 
 export function saveCandidatePolicyState(state: CandidatePolicyState): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.CANDIDATE_POLICY, JSON.stringify(state));
+    if (writeScopedStorageItem(STORAGE_KEYS.CANDIDATE_POLICY, JSON.stringify(state))) {
       triggerCloudSync('candidatePolicy', state);
+      triggerCloudSync('trainingStates', state);
     }
     notifyStoreSubscribers();
   } catch {
@@ -927,19 +1047,19 @@ export function validateAndSaveAndActivateCandidatePolicy(
   });
 
   try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(
-        STORAGE_KEYS.CANDIDATE_POLICY,
-        JSON.stringify(enrichedCandidate)
-      );
-      localStorage.setItem(
-        STORAGE_KEYS.POLICIES,
-        JSON.stringify(updatedPolicies)
-      );
-      localStorage.setItem(STORAGE_KEYS.SELECTED_POLICY_ID, 'pol-candidate-rl');
+    const wroteCand = writeScopedStorageItem(
+      STORAGE_KEYS.CANDIDATE_POLICY,
+      JSON.stringify(enrichedCandidate)
+    );
+    writeScopedStorageItem(
+      STORAGE_KEYS.POLICIES,
+      JSON.stringify(updatedPolicies)
+    );
+    writeScopedStorageItem(STORAGE_KEYS.SELECTED_POLICY_ID, 'pol-candidate-rl');
 
+    if (wroteCand) {
       // Verify persistence read-back
-      const verifyRaw = localStorage.getItem(STORAGE_KEYS.CANDIDATE_POLICY);
+      const verifyRaw = readScopedStorageItem(STORAGE_KEYS.CANDIDATE_POLICY);
       const verifyParsed = verifyRaw
         ? (JSON.parse(verifyRaw) as CandidatePolicyState)
         : null;
@@ -958,8 +1078,9 @@ export function validateAndSaveAndActivateCandidatePolicy(
       }
 
       triggerCloudSync('candidatePolicy', enrichedCandidate);
+      triggerCloudSync('trainingStates', enrichedCandidate);
       triggerCloudSync('policies', updatedPolicies);
-      triggerCloudSync('preferences', {
+      triggerSettingsAndPreferencesCloudSync({
         selectedRobotId: loadSelectedRobotId(),
         selectedEnvironmentId: loadSelectedEnvironmentId(),
         selectedPolicyId: 'pol-candidate-rl',
@@ -997,8 +1118,7 @@ export function resetCandidatePolicyState(): CandidatePolicyState {
 
 export function loadBenchmarkHistory(): BenchmarkSuiteResult[] {
   try {
-    if (typeof localStorage === 'undefined') return [];
-    const raw = localStorage.getItem(STORAGE_KEYS.BENCHMARKS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.BENCHMARKS);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -1013,8 +1133,7 @@ export function saveBenchmarkResult(
   try {
     const current = loadBenchmarkHistory();
     const updated = [result, ...current.filter((b) => b.id !== result.id)];
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.BENCHMARKS, JSON.stringify(updated));
+    if (writeScopedStorageItem(STORAGE_KEYS.BENCHMARKS, JSON.stringify(updated))) {
       triggerCloudSync('benchmarks', updated);
     }
     notifyStoreSubscribers();
@@ -1026,8 +1145,7 @@ export function saveBenchmarkResult(
 
 export function loadFailureDrivenBatches(): FailureDrivenGenerationBatch[] {
   try {
-    if (typeof localStorage === 'undefined') return [];
-    const raw = localStorage.getItem(STORAGE_KEYS.FD_BATCHES);
+    const raw = readScopedStorageItem(STORAGE_KEYS.FD_BATCHES);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -1042,8 +1160,7 @@ export function saveFailureDrivenBatch(
   try {
     const current = loadFailureDrivenBatches();
     const updated = [batch, ...current];
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.FD_BATCHES, JSON.stringify(updated));
+    if (writeScopedStorageItem(STORAGE_KEYS.FD_BATCHES, JSON.stringify(updated))) {
       triggerCloudSync('fdBatches', updated);
     }
     notifyStoreSubscribers();
@@ -1055,8 +1172,7 @@ export function saveFailureDrivenBatch(
 
 export function loadDemoPreviewPreference(): boolean {
   try {
-    if (typeof localStorage === 'undefined') return false;
-    return localStorage.getItem(STORAGE_KEYS.DEMO_MODE) === 'true';
+    return readScopedStorageItem(STORAGE_KEYS.DEMO_MODE) === 'true';
   } catch {
     return false;
   }
@@ -1064,11 +1180,11 @@ export function loadDemoPreviewPreference(): boolean {
 
 export function saveDemoPreviewPreference(enabled: boolean): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.DEMO_MODE, enabled ? 'true' : 'false');
-      triggerCloudSync('preferences', {
+    if (writeScopedStorageItem(STORAGE_KEYS.DEMO_MODE, enabled ? 'true' : 'false')) {
+      triggerSettingsAndPreferencesCloudSync({
         selectedRobotId: loadSelectedRobotId(),
         selectedEnvironmentId: loadSelectedEnvironmentId(),
+        selectedPolicyId: loadSelectedPolicyId(),
         demoPreviewEnabled: enabled,
       });
     }
@@ -1080,8 +1196,7 @@ export function saveDemoPreviewPreference(enabled: boolean): void {
 
 export function loadRobots(): RobotUnitConfig[] {
   try {
-    if (typeof localStorage === 'undefined') return ROBOT_UNITS;
-    const raw = localStorage.getItem(STORAGE_KEYS.ROBOTS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.ROBOTS);
     if (!raw) return ROBOT_UNITS;
     const custom: RobotUnitConfig[] = JSON.parse(raw);
     if (!Array.isArray(custom)) return ROBOT_UNITS;
@@ -1111,17 +1226,15 @@ export function saveCustomRobot(robot: RobotUnitConfig): RobotUnitConfig[] {
           )
         ),
     };
-    if (typeof localStorage === 'undefined') {
-      return [...ROBOT_UNITS, normalized];
-    }
-    const raw = localStorage.getItem(STORAGE_KEYS.ROBOTS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.ROBOTS);
     const custom: RobotUnitConfig[] = raw ? JSON.parse(raw) : [];
     const filtered = Array.isArray(custom)
       ? custom.filter((r) => r && r.id !== normalized.id)
       : [];
     const updatedCustom = [...filtered, normalized];
-    localStorage.setItem(STORAGE_KEYS.ROBOTS, JSON.stringify(updatedCustom));
-    triggerCloudSync('robots', updatedCustom);
+    if (writeScopedStorageItem(STORAGE_KEYS.ROBOTS, JSON.stringify(updatedCustom))) {
+      triggerCloudSync('robots', updatedCustom);
+    }
     notifyStoreSubscribers();
     return [...ROBOT_UNITS, ...updatedCustom];
   } catch {
@@ -1131,14 +1244,14 @@ export function saveCustomRobot(robot: RobotUnitConfig): RobotUnitConfig[] {
 
 export function deleteCustomRobot(robotId: string): RobotUnitConfig[] {
   try {
-    if (typeof localStorage === 'undefined') return ROBOT_UNITS;
-    const raw = localStorage.getItem(STORAGE_KEYS.ROBOTS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.ROBOTS);
     const custom: RobotUnitConfig[] = raw ? JSON.parse(raw) : [];
     const updatedCustom = Array.isArray(custom)
       ? custom.filter((r) => r && r.id !== robotId)
       : [];
-    localStorage.setItem(STORAGE_KEYS.ROBOTS, JSON.stringify(updatedCustom));
-    triggerCloudSync('robots', updatedCustom);
+    if (writeScopedStorageItem(STORAGE_KEYS.ROBOTS, JSON.stringify(updatedCustom))) {
+      triggerCloudSync('robots', updatedCustom);
+    }
     if (loadSelectedRobotId() === robotId) {
       saveSelectedRobotId(ROBOT_UNITS[0].id);
     }
@@ -1151,8 +1264,7 @@ export function deleteCustomRobot(robotId: string): RobotUnitConfig[] {
 
 export function loadSelectedRobotId(): string {
   try {
-    if (typeof localStorage === 'undefined') return ROBOT_UNITS[0].id;
-    const saved = localStorage.getItem(STORAGE_KEYS.SELECTED_ROBOT_ID);
+    const saved = readScopedStorageItem(STORAGE_KEYS.SELECTED_ROBOT_ID);
     const allRobots = loadRobots();
     if (saved && allRobots.some((r) => r.id === saved)) {
       return saved;
@@ -1165,11 +1277,11 @@ export function loadSelectedRobotId(): string {
 
 export function saveSelectedRobotId(robotId: string): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.SELECTED_ROBOT_ID, robotId);
-      triggerCloudSync('preferences', {
+    if (writeScopedStorageItem(STORAGE_KEYS.SELECTED_ROBOT_ID, robotId)) {
+      triggerSettingsAndPreferencesCloudSync({
         selectedRobotId: robotId,
         selectedEnvironmentId: loadSelectedEnvironmentId(),
+        selectedPolicyId: loadSelectedPolicyId(),
         demoPreviewEnabled: loadDemoPreviewPreference(),
       });
     }
@@ -1181,8 +1293,7 @@ export function saveSelectedRobotId(robotId: string): void {
 
 export function loadCrossRobotBenchmarkHistory(): CrossRobotBenchmarkResult[] {
   try {
-    if (typeof localStorage === 'undefined') return [];
-    const raw = localStorage.getItem(STORAGE_KEYS.ROBOT_BENCHMARKS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.ROBOT_BENCHMARKS);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -1197,8 +1308,12 @@ export function saveCrossRobotBenchmarkResult(
   try {
     const current = loadCrossRobotBenchmarkHistory();
     const updated = [result, ...current.filter((b) => b.id !== result.id)];
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.ROBOT_BENCHMARKS, JSON.stringify(updated));
+    if (
+      writeScopedStorageItem(
+        STORAGE_KEYS.ROBOT_BENCHMARKS,
+        JSON.stringify(updated)
+      )
+    ) {
       triggerCloudSync('robotBenchmarks', updated);
     }
     notifyStoreSubscribers();
@@ -1210,8 +1325,7 @@ export function saveCrossRobotBenchmarkResult(
 
 export function loadEnvironments(): EnvironmentDefinition[] {
   try {
-    if (typeof localStorage === 'undefined') return BUILTIN_ENVIRONMENTS;
-    const raw = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.ENVIRONMENTS);
     if (!raw) return BUILTIN_ENVIRONMENTS;
     const custom: EnvironmentDefinition[] = JSON.parse(raw);
     if (!Array.isArray(custom)) return BUILTIN_ENVIRONMENTS;
@@ -1234,6 +1348,31 @@ export function loadEnvironments(): EnvironmentDefinition[] {
   }
 }
 
+/**
+ * Strips oversized inline binary data URLs (> 64KB) from EnvironmentDefinition
+ * before syncing to Firestore so large files stay strictly in browser IndexedDB.
+ */
+export function sanitizeEnvironmentForCloud(
+  env: EnvironmentDefinition
+): EnvironmentDefinition {
+  if (!env.importedMap) return env;
+  const imported = { ...env.importedMap };
+  if (imported.imageDataUrl && imported.imageDataUrl.length > 65536) {
+    delete imported.imageDataUrl;
+  }
+  if (
+    imported.modelDataUrl &&
+    (imported.modelDataUrl.length > 65536 ||
+      imported.modelDataUrl.startsWith('blob:'))
+  ) {
+    delete imported.modelDataUrl;
+  }
+  return {
+    ...env,
+    importedMap: imported,
+  };
+}
+
 export function saveCustomEnvironment(
   env: EnvironmentDefinition
 ): EnvironmentDefinition[] {
@@ -1242,17 +1381,29 @@ export function saveCustomEnvironment(
       ...env,
       updatedAt: new Date().toISOString(),
     });
-    if (typeof localStorage === 'undefined') {
-      return [...BUILTIN_ENVIRONMENTS, synced];
-    }
-    const raw = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.ENVIRONMENTS);
     const custom: EnvironmentDefinition[] = raw ? JSON.parse(raw) : [];
     const filtered = Array.isArray(custom)
       ? custom.filter((c) => c && c.id !== synced.id)
       : [];
     const updatedCustom = [...filtered, synced];
-    localStorage.setItem(STORAGE_KEYS.ENVIRONMENTS, JSON.stringify(updatedCustom));
-    triggerCloudSync('environments', updatedCustom);
+    const wrote = writeScopedStorageItem(
+      STORAGE_KEYS.ENVIRONMENTS,
+      JSON.stringify(updatedCustom)
+    );
+    if (!wrote) {
+      // If localStorage quota is tight due to inline dataUrl, store sanitized copy in localStorage
+      // (full binary blob is already stored in IndexedDB)
+      const sanitizedLocal = updatedCustom.map(sanitizeEnvironmentForCloud);
+      writeScopedStorageItem(
+        STORAGE_KEYS.ENVIRONMENTS,
+        JSON.stringify(sanitizedLocal)
+      );
+    }
+    triggerCloudSync(
+      'environments',
+      updatedCustom.map(sanitizeEnvironmentForCloud)
+    );
     notifyStoreSubscribers();
     return loadEnvironments();
   } catch {
@@ -1262,14 +1413,22 @@ export function saveCustomEnvironment(
 
 export function deleteCustomEnvironment(envId: string): EnvironmentDefinition[] {
   try {
-    if (typeof localStorage === 'undefined') return BUILTIN_ENVIRONMENTS;
-    const raw = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
+    const raw = readScopedStorageItem(STORAGE_KEYS.ENVIRONMENTS);
     const custom: EnvironmentDefinition[] = raw ? JSON.parse(raw) : [];
     const updatedCustom = Array.isArray(custom)
       ? custom.filter((c) => c && c.id !== envId)
       : [];
-    localStorage.setItem(STORAGE_KEYS.ENVIRONMENTS, JSON.stringify(updatedCustom));
-    triggerCloudSync('environments', updatedCustom);
+    if (
+      writeScopedStorageItem(
+        STORAGE_KEYS.ENVIRONMENTS,
+        JSON.stringify(updatedCustom)
+      )
+    ) {
+      triggerCloudSync(
+        'environments',
+        updatedCustom.map(sanitizeEnvironmentForCloud)
+      );
+    }
     if (loadSelectedEnvironmentId() === envId) {
       saveSelectedEnvironmentId(BUILTIN_ENVIRONMENTS[0].id);
     }
@@ -1282,8 +1441,7 @@ export function deleteCustomEnvironment(envId: string): EnvironmentDefinition[] 
 
 export function loadSelectedEnvironmentId(): string {
   try {
-    if (typeof localStorage === 'undefined') return BUILTIN_ENVIRONMENTS[0].id;
-    const saved = localStorage.getItem(STORAGE_KEYS.SELECTED_ENVIRONMENT_ID);
+    const saved = readScopedStorageItem(STORAGE_KEYS.SELECTED_ENVIRONMENT_ID);
     const allEnvs = loadEnvironments();
     if (saved && allEnvs.some((e) => e.id === saved)) {
       return saved;
@@ -1296,149 +1454,409 @@ export function loadSelectedEnvironmentId(): string {
 
 export function saveSelectedEnvironmentId(envId: string): void {
   try {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.setItem(STORAGE_KEYS.SELECTED_ENVIRONMENT_ID, envId);
-    triggerCloudSync('preferences', {
-      selectedRobotId: loadSelectedRobotId(),
-      selectedEnvironmentId: envId,
-      demoPreviewEnabled: loadDemoPreviewPreference(),
-    });
+    if (writeScopedStorageItem(STORAGE_KEYS.SELECTED_ENVIRONMENT_ID, envId)) {
+      triggerSettingsAndPreferencesCloudSync({
+        selectedRobotId: loadSelectedRobotId(),
+        selectedEnvironmentId: envId,
+        selectedPolicyId: loadSelectedPolicyId(),
+        demoPreviewEnabled: loadDemoPreviewPreference(),
+      });
+    }
     notifyStoreSubscribers();
   } catch {
     // ignore
   }
 }
 
+function extractRecordTimestampMs(item: unknown): number {
+  if (!item || typeof item !== 'object') return 0;
+  const rec = item as Record<string, unknown>;
+  const candidates = [
+    rec.updatedAt,
+    rec.activatedAt,
+    rec.lastTrainedAt,
+    rec.createdAt,
+    rec.timestamp,
+  ];
+  for (const val of candidates) {
+    if (typeof val === 'string' && val.trim()) {
+      const parsed = Date.parse(val.replace(' ', 'T'));
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+  }
+  return 0;
+}
+
 /**
- * Safely merges localStorage data with the authenticated user's Firestore workspace.
- * Never deletes local user data — merges by ID and pushes the unified state back to Firestore.
+ * Safely merges local and cloud arrays by stable ID (`id`) and update timestamp.
+ * Neither local nor cloud blindly overwrites newer records.
  */
-export async function hydrateAndMigrateUserWorkspace(uid: string): Promise<{
+function mergeRecordsSafely<T extends { id: string }>(
+  localArr: T[],
+  cloudArr: unknown
+): T[] {
+  const map = new Map<string, T>();
+
+  if (Array.isArray(cloudArr)) {
+    for (const rawItem of cloudArr) {
+      if (rawItem && typeof rawItem === 'object' && 'id' in rawItem) {
+        const item = rawItem as T;
+        if (item.id) {
+          map.set(item.id, item);
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(localArr)) {
+    for (const localItem of localArr) {
+      if (!localItem || !localItem.id) continue;
+      const existingCloud = map.get(localItem.id);
+      if (!existingCloud) {
+        map.set(localItem.id, localItem);
+      } else {
+        const cloudTs = extractRecordTimestampMs(existingCloud);
+        const localTs = extractRecordTimestampMs(localItem);
+        // Prefer whichever record has the newer timestamp; if equal/missing, prefer local working copy
+        // while preserving any local runtime preview fields (e.g. imageDataUrl)
+        if (localTs >= cloudTs) {
+          map.set(localItem.id, { ...existingCloud, ...localItem });
+        } else {
+          map.set(localItem.id, { ...localItem, ...existingCloud });
+        }
+      }
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+/**
+ * Flushes any pending workspace categories that were queued while offline for the given uid.
+ */
+export async function flushPendingCloudSync(uid: string): Promise<number> {
+  if (!uid || activeCloudUid !== uid) return 0;
+  const pending = getPendingSyncCategories(uid);
+  if (pending.length === 0) return 0;
+  let flushedCount = 0;
+
+  for (const category of pending) {
+    if (activeCloudUid !== uid) break;
+    let ok = false;
+    switch (category) {
+      case 'robots': {
+        const raw = readScopedStorageItem(STORAGE_KEYS.ROBOTS);
+        ok = await saveWorkspaceCategoryToCloud(
+          uid,
+          'robots',
+          raw ? JSON.parse(raw) : []
+        );
+        break;
+      }
+      case 'environments': {
+        const raw = readScopedStorageItem(STORAGE_KEYS.ENVIRONMENTS);
+        const parsed: EnvironmentDefinition[] = raw ? JSON.parse(raw) : [];
+        ok = await saveWorkspaceCategoryToCloud(
+          uid,
+          'environments',
+          parsed.map(sanitizeEnvironmentForCloud)
+        );
+        break;
+      }
+      case 'scenarios': {
+        const raw = readScopedStorageItem(STORAGE_KEYS.SCENARIOS);
+        ok = await saveWorkspaceCategoryToCloud(
+          uid,
+          'scenarios',
+          raw ? JSON.parse(raw) : []
+        );
+        break;
+      }
+      case 'policies': {
+        ok = await saveWorkspaceCategoryToCloud(uid, 'policies', loadPolicies());
+        break;
+      }
+      case 'candidatePolicy':
+      case 'trainingStates': {
+        const cand = loadCandidatePolicyState();
+        ok = await saveWorkspaceCategoryToCloud(uid, category, cand);
+        break;
+      }
+      case 'experiments': {
+        ok = await saveWorkspaceCategoryToCloud(
+          uid,
+          'experiments',
+          loadStoredExperiments()
+        );
+        break;
+      }
+      case 'failures': {
+        const exps = loadStoredExperiments();
+        ok = await saveWorkspaceCategoryToCloud(
+          uid,
+          'failures',
+          deriveFailureRecordsFromExperiments(exps)
+        );
+        break;
+      }
+      case 'benchmarks': {
+        ok = await saveWorkspaceCategoryToCloud(
+          uid,
+          'benchmarks',
+          loadBenchmarkHistory()
+        );
+        break;
+      }
+      case 'robotBenchmarks': {
+        ok = await saveWorkspaceCategoryToCloud(
+          uid,
+          'robotBenchmarks',
+          loadCrossRobotBenchmarkHistory()
+        );
+        break;
+      }
+      case 'fdBatches': {
+        ok = await saveWorkspaceCategoryToCloud(
+          uid,
+          'fdBatches',
+          loadFailureDrivenBatches()
+        );
+        break;
+      }
+      case 'preferences':
+      case 'settings': {
+        ok = await saveWorkspaceCategoryToCloud(uid, category, {
+          selectedRobotId: loadSelectedRobotId(),
+          selectedEnvironmentId: loadSelectedEnvironmentId(),
+          selectedPolicyId: loadSelectedPolicyId(),
+          demoPreviewEnabled: loadDemoPreviewPreference(),
+        });
+        break;
+      }
+    }
+    if (ok) flushedCount++;
+  }
+  return flushedCount;
+}
+
+/**
+ * Strictly isolated per-user workspace hydration and synchronization.
+ * Merges ONLY the authenticated user's own local cache (`robosim_workspace_user_${uid}_*`)
+ * with their Firestore documents (`users/${uid}/workspace/*`).
+ * Never reads or imports another user's workspace or the Guest workspace.
+ */
+export async function hydrateAndMigrateUserWorkspace(
+  uid: string,
+  isSessionStillValid?: () => boolean
+): Promise<{
   migratedCounts: {
     robots: number;
     environments: number;
     scenarios: number;
     experiments: number;
     benchmarks: number;
+    localFilesClaimed: number;
   };
 }> {
-  setActiveCloudUserId(uid);
-  const cloudData = await loadAllWorkspaceCategoriesFromCloud(uid);
-
-  const mergeById = <T extends { id: string }>(
-    localArr: T[],
-    cloudArr: unknown
-  ): T[] => {
-    const map = new Map<string, T>();
-    if (Array.isArray(cloudArr)) {
-      for (const item of cloudArr) {
-        if (item && typeof item === 'object' && 'id' in item) {
-          map.set((item as T).id, item as T);
-        }
-      }
-    }
-    for (const item of localArr) {
-      if (item && item.id) {
-        map.set(item.id, item);
-      }
-    }
-    return Array.from(map.values());
+  const emptyResult = {
+    migratedCounts: {
+      robots: 0,
+      environments: 0,
+      scenarios: 0,
+      experiments: 0,
+      benchmarks: 0,
+      localFilesClaimed: 0,
+    },
   };
 
-  // 1. Custom Robots
-  const rawLocalRobots = localStorage.getItem(STORAGE_KEYS.ROBOTS);
+  if (!uid || !uid.trim()) {
+    return emptyResult;
+  }
+
+  // Immediately lock the active workspace scope to this authenticated user's UID
+  setActiveWorkspaceScope('user', uid);
+
+  const checkValid = () => {
+    if (activeScopeMode !== 'user' || activeCloudUid !== uid) return false;
+    if (isSessionStillValid && !isSessionStillValid()) return false;
+    return true;
+  };
+
+  const { categories: cloudData } = await loadAllWorkspaceCategoriesFromCloud(uid);
+
+  // Guard against stale async completion if user signed out or switched accounts
+  if (!checkValid()) {
+    return emptyResult;
+  }
+
+  // 1. Custom Robots (strictly scoped to robosim_workspace_user_${uid}_custom_robots_v1)
+  const rawLocalRobots = readScopedStorageItem(STORAGE_KEYS.ROBOTS);
   const localCustomRobots: RobotUnitConfig[] = rawLocalRobots
     ? JSON.parse(rawLocalRobots)
     : [];
-  const mergedRobots = mergeById(localCustomRobots, cloudData.robots);
-  localStorage.setItem(STORAGE_KEYS.ROBOTS, JSON.stringify(mergedRobots));
+  const mergedRobots = mergeRecordsSafely(localCustomRobots, cloudData.robots);
+  writeScopedStorageItem(STORAGE_KEYS.ROBOTS, JSON.stringify(mergedRobots));
   await saveWorkspaceCategoryToCloud(uid, 'robots', mergedRobots);
+  if (!checkValid()) return emptyResult;
 
-  // 2. Custom Environments
-  const rawLocalEnvs = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
+  // 2. Custom Environments (preserving local preview URLs & IndexedDB file references)
+  const rawLocalEnvs = readScopedStorageItem(STORAGE_KEYS.ENVIRONMENTS);
   const localCustomEnvs: EnvironmentDefinition[] = rawLocalEnvs
     ? JSON.parse(rawLocalEnvs)
     : [];
-  const mergedEnvs = mergeById(localCustomEnvs, cloudData.environments);
-  localStorage.setItem(STORAGE_KEYS.ENVIRONMENTS, JSON.stringify(mergedEnvs));
-  await saveWorkspaceCategoryToCloud(uid, 'environments', mergedEnvs);
+  const mergedEnvs = mergeRecordsSafely(
+    localCustomEnvs,
+    cloudData.environments
+  ).map((env) => syncEnvironmentDerivedStructures(env));
+  if (!writeScopedStorageItem(STORAGE_KEYS.ENVIRONMENTS, JSON.stringify(mergedEnvs))) {
+    writeScopedStorageItem(
+      STORAGE_KEYS.ENVIRONMENTS,
+      JSON.stringify(mergedEnvs.map(sanitizeEnvironmentForCloud))
+    );
+  }
+  await saveWorkspaceCategoryToCloud(
+    uid,
+    'environments',
+    mergedEnvs.map(sanitizeEnvironmentForCloud)
+  );
+  if (!checkValid()) return emptyResult;
 
   // 3. Custom Scenarios
-  const rawLocalScens = localStorage.getItem(STORAGE_KEYS.SCENARIOS);
+  const rawLocalScens = readScopedStorageItem(STORAGE_KEYS.SCENARIOS);
   const localCustomScens: ScenarioConfig[] = rawLocalScens
     ? JSON.parse(rawLocalScens)
     : [];
-  const mergedScens = mergeById(localCustomScens, cloudData.scenarios);
-  localStorage.setItem(STORAGE_KEYS.SCENARIOS, JSON.stringify(mergedScens));
+  const mergedScens = mergeRecordsSafely(localCustomScens, cloudData.scenarios);
+  writeScopedStorageItem(STORAGE_KEYS.SCENARIOS, JSON.stringify(mergedScens));
   await saveWorkspaceCategoryToCloud(uid, 'scenarios', mergedScens);
+  if (!checkValid()) return emptyResult;
 
   // 4. Experiments & Failures
   const localExps = loadStoredExperiments();
-  const mergedExps = mergeById(localExps, cloudData.experiments);
-  localStorage.setItem(STORAGE_KEYS.EXPERIMENTS, JSON.stringify(mergedExps));
+  const mergedExps = mergeRecordsSafely(localExps, cloudData.experiments);
+  writeScopedStorageItem(STORAGE_KEYS.EXPERIMENTS, JSON.stringify(mergedExps));
   const derivedFailures = deriveFailureRecordsFromExperiments(mergedExps);
-  localStorage.setItem(STORAGE_KEYS.FAILURES, JSON.stringify(derivedFailures));
+  writeScopedStorageItem(STORAGE_KEYS.FAILURES, JSON.stringify(derivedFailures));
   await saveWorkspaceCategoryToCloud(uid, 'experiments', mergedExps);
   await saveWorkspaceCategoryToCloud(uid, 'failures', derivedFailures);
+  if (!checkValid()) return emptyResult;
 
-  // 5. Candidate Policy State
+  // 5. Candidate Policy State & Training States (Never reset or overwrite a trained policy with an untrained one)
   const localCand = loadCandidatePolicyState();
-  const cloudCand = cloudData.candidatePolicy as CandidatePolicyState | undefined;
-  const activeCand =
-    cloudCand &&
-    (cloudCand.totalEpisodesTrained ?? 0) > (localCand.totalEpisodesTrained ?? 0)
-      ? cloudCand
-      : localCand;
-  localStorage.setItem(STORAGE_KEYS.CANDIDATE_POLICY, JSON.stringify(activeCand));
-  await saveWorkspaceCategoryToCloud(uid, 'candidatePolicy', activeCand);
+  const cloudCand = (cloudData.candidatePolicy ??
+    cloudData.trainingStates) as CandidatePolicyState | undefined;
 
-  // 6. Benchmarks & Cross-Robot Benchmarks
+  let activeCand = localCand;
+  if (cloudCand && typeof cloudCand === 'object' && cloudCand.qTable) {
+    const cloudStatesCount = Object.keys(cloudCand.qTable).length;
+    const localStatesCount = Object.keys(localCand.qTable || {}).length;
+    const cloudEpisodes = cloudCand.totalEpisodesTrained ?? 0;
+    const localEpisodes = localCand.totalEpisodesTrained ?? 0;
+    const cloudTs = extractRecordTimestampMs(cloudCand);
+    const localTs = extractRecordTimestampMs(localCand);
+
+    if (
+      (cloudCand.isTrained && !localCand.isTrained) ||
+      cloudEpisodes > localEpisodes ||
+      (cloudEpisodes === localEpisodes &&
+        cloudStatesCount >= localStatesCount &&
+        cloudTs > localTs)
+    ) {
+      activeCand = cloudCand;
+    }
+  }
+  writeScopedStorageItem(STORAGE_KEYS.CANDIDATE_POLICY, JSON.stringify(activeCand));
+  await saveWorkspaceCategoryToCloud(uid, 'candidatePolicy', activeCand);
+  await saveWorkspaceCategoryToCloud(uid, 'trainingStates', activeCand);
+  if (!checkValid()) return emptyResult;
+
+  // 6. Policies Metadata
+  const localPols = loadPolicies();
+  const mergedPols = mergeRecordsSafely(localPols, cloudData.policies);
+  writeScopedStorageItem(STORAGE_KEYS.POLICIES, JSON.stringify(mergedPols));
+  await saveWorkspaceCategoryToCloud(uid, 'policies', loadPolicies());
+  if (!checkValid()) return emptyResult;
+
+  // 7. Benchmarks, Cross-Robot Benchmarks & Failure-Driven Batches
   const localBench = loadBenchmarkHistory();
-  const mergedBench = mergeById(localBench, cloudData.benchmarks);
-  localStorage.setItem(STORAGE_KEYS.BENCHMARKS, JSON.stringify(mergedBench));
+  const mergedBench = mergeRecordsSafely(localBench, cloudData.benchmarks);
+  writeScopedStorageItem(STORAGE_KEYS.BENCHMARKS, JSON.stringify(mergedBench));
   await saveWorkspaceCategoryToCloud(uid, 'benchmarks', mergedBench);
 
   const localRobotBench = loadCrossRobotBenchmarkHistory();
-  const mergedRobotBench = mergeById(localRobotBench, cloudData.robotBenchmarks);
-  localStorage.setItem(
+  const mergedRobotBench = mergeRecordsSafely(
+    localRobotBench,
+    cloudData.robotBenchmarks
+  );
+  writeScopedStorageItem(
     STORAGE_KEYS.ROBOT_BENCHMARKS,
     JSON.stringify(mergedRobotBench)
   );
   await saveWorkspaceCategoryToCloud(uid, 'robotBenchmarks', mergedRobotBench);
 
-  // 7. Preferences
-  const cloudPrefs = cloudData.preferences as
+  const localFdBatches = loadFailureDrivenBatches();
+  const mergedFdBatches = mergeRecordsSafely(localFdBatches, cloudData.fdBatches);
+  writeScopedStorageItem(STORAGE_KEYS.FD_BATCHES, JSON.stringify(mergedFdBatches));
+  await saveWorkspaceCategoryToCloud(uid, 'fdBatches', mergedFdBatches);
+  if (!checkValid()) return emptyResult;
+
+  // 8. Preferences & Settings
+  const cloudPrefs = (cloudData.settings ?? cloudData.preferences) as
     | {
         selectedRobotId?: string;
         selectedEnvironmentId?: string;
+        selectedPolicyId?: string;
         demoPreviewEnabled?: boolean;
       }
     | undefined;
-  if (cloudPrefs?.selectedRobotId && !localStorage.getItem(STORAGE_KEYS.SELECTED_ROBOT_ID)) {
-    localStorage.setItem(STORAGE_KEYS.SELECTED_ROBOT_ID, cloudPrefs.selectedRobotId);
+  if (
+    cloudPrefs?.selectedRobotId &&
+    !readScopedStorageItem(STORAGE_KEYS.SELECTED_ROBOT_ID)
+  ) {
+    writeScopedStorageItem(
+      STORAGE_KEYS.SELECTED_ROBOT_ID,
+      cloudPrefs.selectedRobotId
+    );
   }
   if (
     cloudPrefs?.selectedEnvironmentId &&
-    !localStorage.getItem(STORAGE_KEYS.SELECTED_ENVIRONMENT_ID)
+    !readScopedStorageItem(STORAGE_KEYS.SELECTED_ENVIRONMENT_ID)
   ) {
-    localStorage.setItem(
+    writeScopedStorageItem(
       STORAGE_KEYS.SELECTED_ENVIRONMENT_ID,
       cloudPrefs.selectedEnvironmentId
     );
   }
-  const cloudPrefsWithPol = cloudData.preferences as
-    | { selectedPolicyId?: string }
-    | undefined;
   if (
-    cloudPrefsWithPol?.selectedPolicyId &&
-    !localStorage.getItem(STORAGE_KEYS.SELECTED_POLICY_ID)
+    cloudPrefs?.selectedPolicyId &&
+    !readScopedStorageItem(STORAGE_KEYS.SELECTED_POLICY_ID)
   ) {
-    localStorage.setItem(
+    writeScopedStorageItem(
       STORAGE_KEYS.SELECTED_POLICY_ID,
-      cloudPrefsWithPol.selectedPolicyId
+      cloudPrefs.selectedPolicyId
+    );
+  }
+  if (
+    typeof cloudPrefs?.demoPreviewEnabled === 'boolean' &&
+    readScopedStorageItem(STORAGE_KEYS.DEMO_MODE) === null
+  ) {
+    writeScopedStorageItem(
+      STORAGE_KEYS.DEMO_MODE,
+      cloudPrefs.demoPreviewEnabled ? 'true' : 'false'
     );
   }
 
+  const resolvedSettings = {
+    selectedRobotId: loadSelectedRobotId(),
+    selectedEnvironmentId: loadSelectedEnvironmentId(),
+    selectedPolicyId: loadSelectedPolicyId(),
+    demoPreviewEnabled: loadDemoPreviewPreference(),
+  };
+
+  await saveWorkspaceCategoryToCloud(uid, 'preferences', resolvedSettings);
+  await saveWorkspaceCategoryToCloud(uid, 'settings', resolvedSettings);
+
+  if (!checkValid()) return emptyResult;
   notifyStoreSubscribers();
 
   return {
@@ -1448,8 +1866,52 @@ export async function hydrateAndMigrateUserWorkspace(uid: string): Promise<{
       scenarios: mergedScens.length,
       experiments: mergedExps.length,
       benchmarks: mergedBench.length + mergedRobotBench.length,
+      localFilesClaimed: 0,
     },
   };
 }
+
+/**
+ * Explicit, opt-in helper to import Guest Workspace records into the specified authenticated user's workspace.
+ * Never invoked automatically on sign-in so Guest data is never duplicated across accounts.
+ */
+export async function migrateGuestWorkspaceToUser(uid: string): Promise<void> {
+  if (!uid || typeof localStorage === 'undefined') return;
+  const readGuest = <T>(baseKey: string, fallback: T): T => {
+    try {
+      const k = getScopedStorageKey(baseKey, { mode: 'guest' });
+      const raw = k ? localStorage.getItem(k) : null;
+      return raw ? (JSON.parse(raw) as T) : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
+  setActiveWorkspaceScope('user', uid);
+
+  const guestRobots = readGuest<RobotUnitConfig[]>(STORAGE_KEYS.ROBOTS, []);
+  for (const r of guestRobots) {
+    saveCustomRobot(r);
+  }
+  const guestEnvs = readGuest<EnvironmentDefinition[]>(
+    STORAGE_KEYS.ENVIRONMENTS,
+    []
+  );
+  for (const e of guestEnvs) {
+    saveCustomEnvironment(e);
+  }
+  const guestScens = readGuest<ScenarioConfig[]>(STORAGE_KEYS.SCENARIOS, []);
+  if (guestScens.length > 0) {
+    saveCustomScenariosBatch(guestScens);
+  }
+  const guestExps = readGuest<ExperimentRecord[]>(STORAGE_KEYS.EXPERIMENTS, []);
+  if (guestExps.length > 0) {
+    saveStoredExperimentsBatch(guestExps);
+  }
+  await localEnvironmentFileStorage.claimGuestFilesForUser(uid);
+  notifyStoreSubscribers();
+}
+
+
 
 

@@ -258,17 +258,45 @@ export interface MapElement2D {
   floorsServed?: number[];
 }
 
+export type LocalEnvironmentFileCategory =
+  | 'floorplan-image'
+  | 'ros-occupancy-image'
+  | 'ros-yaml'
+  | 'gltf-3d'
+  | 'geojson'
+  | 'other';
+
+export interface LocalEnvironmentFileRef {
+  localFileId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  category: LocalEnvironmentFileCategory;
+  ownerUid: string;
+  environmentId: string;
+  createdAt: string;
+  updatedAt: string;
+  storageBackend: 'indexeddb-local';
+  checksum?: string;
+}
+
 export interface ImportedMapMetadata {
   sourceType: 'floorplan-image' | 'ros-occupancy' | 'geojson' | 'gltf-3d';
   fileName: string;
   importedAt: string;
   metersPerPixel?: number;
   originWorld?: [number, number];
+  /** Transient runtime preview URL (resolved from IndexedDB or local upload; stripped before Firestore sync if >64KB) */
   imageDataUrl?: string;
   modelDataUrl?: string;
   rosResolution?: number;
   occupiedThreshold?: number;
   freeThreshold?: number;
+  rosYamlContent?: string;
+  /** Reference to primary binary file stored in browser IndexedDB */
+  localFileRef?: LocalEnvironmentFileRef;
+  /** Additional local files associated with this environment (e.g. ROS YAML + occupancy PNG, GLB assets) */
+  localAssets?: LocalEnvironmentFileRef[];
 }
 
 export interface EnvironmentValidationIssue {

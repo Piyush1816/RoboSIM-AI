@@ -68,6 +68,8 @@ export const WelcomeAuthPage: React.FC = () => {
     continueInLocalWorkspace,
     authError,
     clearAuthError,
+    isFirebaseConfigured,
+    activeFirebaseProjectId,
   } = useAuth();
 
   const [mode, setMode] = useState<'signin' | 'signup' | 'reset'>('signin');
@@ -212,27 +214,33 @@ export const WelcomeAuthPage: React.FC = () => {
             <div className="p-3.5 rounded-lg bg-[#0b1120] border border-slate-800 flex items-start gap-2.5">
               <Cloud className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
               <div>
-                <div className="font-semibold text-slate-200">Isolated User Workspaces</div>
+                <div className="font-semibold text-slate-200">
+                  Spark Cloud Workspaces ({activeFirebaseProjectId})
+                </div>
                 <div className="text-slate-400 mt-0.5">
-                  Per-user Firestore cloud storage for custom environments, robots, Q-tables, and experiments.
+                  Per-user Firestore (<code className="font-mono text-slate-300">(default)</code>) sync for robots, environments, Q-tables, and experiments.
                 </div>
               </div>
             </div>
             <div className="p-3.5 rounded-lg bg-[#0b1120] border border-slate-800 flex items-start gap-2.5">
               <Bot className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
               <div>
-                <div className="font-semibold text-slate-200">Multi-Robot Kinematics</div>
+                <div className="font-semibold text-slate-200">
+                  IndexedDB Local File Storage
+                </div>
                 <div className="text-slate-400 mt-0.5">
-                  CortexRover X1, OmniStride S4, SwiftPulse A2, and custom chassis/LiDAR hardware profiles.
+                  Floor plans (PNG/JPG), ROS maps, and GLB/GLTF 3D files are stored in browser IndexedDB (device-local on Spark plan).
                 </div>
               </div>
             </div>
             <div className="p-3.5 rounded-lg bg-[#0b1120] border border-slate-800 flex items-start gap-2.5">
               <CheckCircle2 className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
               <div>
-                <div className="font-semibold text-slate-200">Safe Local Migration</div>
+                <div className="font-semibold text-slate-200">
+                  Timestamp-Safe Merge
+                </div>
                 <div className="text-slate-400 mt-0.5">
-                  Existing browser experiments & custom scenarios automatically merge into your account upon sign-in.
+                  Existing browser experiments, scenarios, and trained policies safely merge into your account by ID and timestamp.
                 </div>
               </div>
             </div>
@@ -242,13 +250,18 @@ export const WelcomeAuthPage: React.FC = () => {
         {/* Right Column: Authentication Card */}
         <div className="lg:col-span-5 bg-[#0b1120] border border-slate-800 rounded-xl p-6 space-y-5">
           <div className="space-y-1">
-            <h2 className="font-display font-bold text-xl text-slate-100">
-              {mode === 'signin'
-                ? 'Sign In to Your Workspace'
-                : mode === 'signup'
-                ? 'Create Your RoboSim AI Account'
-                : 'Reset Your Account Password'}
-            </h2>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="font-display font-bold text-xl text-slate-100">
+                {mode === 'signin'
+                  ? 'Sign In to Your Workspace'
+                  : mode === 'signup'
+                  ? 'Create Your RoboSim AI Account'
+                  : 'Reset Your Account Password'}
+              </h2>
+              <span className="px-2 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/30 font-mono text-[10px] text-cyan-300">
+                {activeFirebaseProjectId}
+              </span>
+            </div>
             <p className="text-xs text-slate-400">
               {mode === 'signin'
                 ? 'Access your saved robot configurations, custom 2D environments, trained policies, and experiment history.'
@@ -257,6 +270,30 @@ export const WelcomeAuthPage: React.FC = () => {
                 : 'Enter your account email to receive a password reset link.'}
             </p>
           </div>
+
+          {!isFirebaseConfigured && (
+            <div className="p-3 rounded-lg bg-amber-950/40 border border-amber-500/40 text-xs text-amber-200 space-y-1.5">
+              <div className="font-semibold flex items-center gap-1.5 text-amber-300">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>
+                  Awaiting Web App Config for {activeFirebaseProjectId}
+                </span>
+              </div>
+              <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                Target project is set to{' '}
+                <code className="font-mono text-amber-100">
+                  {activeFirebaseProjectId}
+                </code>{' '}
+                (<code className="font-mono text-amber-100">(default)</code>{' '}
+                Firestore). Provide your Web App <code className="font-mono">apiKey</code> and{' '}
+                <code className="font-mono">appId</code> in{' '}
+                <code className="font-mono">firebase-applet-config.json</code> to
+                enable Cloud Auth, or click{' '}
+                <strong className="text-white">Continue in Local Mode</strong>{' '}
+                below to use all simulation features immediately.
+              </p>
+            </div>
+          )}
 
           {/* Mode Tabs */}
           <div className="grid grid-cols-2 gap-2 p-1 rounded-lg bg-[#070b14] border border-slate-800">

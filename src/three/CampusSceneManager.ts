@@ -62,6 +62,10 @@ interface DynamicPedestrianMeshHandle {
 // preserves a completed, paused, or failed simulation at its exact robot position & state.
 let persistedLabController: AutonomousNavigationController | null = null;
 
+export function clearPersistedLabController(): void {
+  persistedLabController = null;
+}
+
 export class CampusSceneManager {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
