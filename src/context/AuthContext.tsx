@@ -48,6 +48,7 @@ interface AuthContextValue {
   isWorkspaceLoading: boolean;
   isGuestWorkspace: boolean;
   showWelcomePage: boolean;
+  isAuthModalOpen: boolean;
   isSyncingCloud: boolean;
   lastSyncSummary: string | null;
   authError: string | null;
@@ -67,6 +68,9 @@ interface AuthContextValue {
   logout: () => Promise<void>;
   continueInLocalWorkspace: () => void;
   openWelcomeScreen: () => void;
+  handleGetStarted: () => void;
+  openAuthModal: () => void;
+  closeAuthModal: () => void;
   syncWorkspaceNow: () => Promise<void>;
 }
 
@@ -143,7 +147,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       return false;
     }
   });
-  const [showWelcomePage, setShowWelcomePage] = useState<boolean>(false);
+  // Always display the public welcome page first when opening or refreshing the website
+  const [showWelcomePage, setShowWelcomePage] = useState<boolean>(true);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [isSyncingCloud, setIsSyncingCloud] = useState<boolean>(false);
   const [lastSyncSummary, setLastSyncSummary] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -152,6 +158,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   // Monotonic session sequence counter to cancel stale async workspace loads when switching accounts
   const authSessionSeqRef = useRef<number>(0);
+  // If user clicked "Get Started" before Firebase Auth finished initial resolution, remember intent
+  const pendingGetStartedRef = useRef<boolean>(false);
 
   const clearAuthError = useCallback(() => setAuthError(null), []);
 
@@ -223,10 +231,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         } catch {
           // ignore
         }
-        setShowWelcomePage(false);
         setIsAuthReady(true);
         setIsWorkspaceLoading(true);
         setIsSyncingCloud(true);
+
+        // If the user clicked "Get Started" while auth state was still resolving, navigate now
+        if (pendingGetStartedRef.current) {
+          pendingGetStartedRef.current = false;
+          setIsAuthModalOpen(false);
+          setShowWelcomePage(false);
+        }
 
         try {
           const res = await hydrateAndMigrateUserWorkspace(
@@ -271,6 +285,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         setIsWorkspaceLoading(false);
         setIsSyncingCloud(false);
         setCloudSyncStatus(getCloudSyncStatusSnapshot(null));
+
+        if (pendingGetStartedRef.current) {
+          pendingGetStartedRef.current = false;
+          setIsAuthModalOpen(true);
+        }
       }
     });
 
@@ -293,6 +312,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         if (cred.user?.uid) {
           setActiveWorkspaceScope('user', cred.user.uid);
         }
+        setIsAuthModalOpen(false);
         setShowWelcomePage(false);
         return true;
       } catch (err) {
@@ -332,6 +352,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           selectedPolicyId: loadSelectedPolicyId(),
           demoPreviewEnabled: loadDemoPreviewPreference(),
         });
+        setIsAuthModalOpen(false);
         setShowWelcomePage(false);
         return true;
       } catch (err) {
@@ -353,6 +374,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       if (cred.user?.uid) {
         setActiveWorkspaceScope('user', cred.user.uid);
       }
+      setIsAuthModalOpen(false);
       setShowWelcomePage(false);
       return true;
     } catch (err) {
@@ -381,6 +403,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const logout = useCallback(async (): Promise<void> => {
     setAuthError(null);
+    pendingGetStartedRef.current = false;
     // Invalidate any in-flight cloud workspace hydration for the outgoing account
     authSessionSeqRef.current += 1;
     try {
@@ -395,6 +418,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     setIsWorkspaceLoading(false);
     setIsSyncingCloud(false);
     setLastSyncSummary(null);
+    setIsAuthModalOpen(false);
     setShowWelcomePage(true);
 
     try {
@@ -409,6 +433,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const continueInLocalWorkspace = useCallback(() => {
     setAuthError(null);
+    pendingGetStartedRef.current = false;
     authSessionSeqRef.current += 1;
     try {
       localStorage.setItem(GUEST_SESSION_KEY, 'true');
@@ -418,12 +443,41 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     setActiveWorkspaceScope('guest', null);
     setIsGuestWorkspace(true);
     setIsWorkspaceLoading(false);
+    setIsAuthModalOpen(false);
     setShowWelcomePage(false);
   }, []);
 
   const openWelcomeScreen = useCallback(() => {
+    setIsAuthModalOpen(false);
     setShowWelcomePage(true);
   }, []);
+
+  const openAuthModal = useCallback(() => {
+    setAuthError(null);
+    setIsAuthModalOpen(true);
+  }, []);
+
+  const closeAuthModal = useCallback(() => {
+    setAuthError(null);
+    setIsAuthModalOpen(false);
+  }, []);
+
+  const handleGetStarted = useCallback(() => {
+    setAuthError(null);
+    if (!isAuthReady) {
+      pendingGetStartedRef.current = true;
+      return;
+    }
+    if (user) {
+      // Already authenticated: navigate directly to the user's UID-isolated dashboard without asking to sign in again
+      setActiveWorkspaceScope('user', user.uid);
+      setIsAuthModalOpen(false);
+      setShowWelcomePage(false);
+      return;
+    }
+    // Unauthenticated: open the sign-in/sign-up modal popup
+    setIsAuthModalOpen(true);
+  }, [isAuthReady, user]);
 
   const syncWorkspaceNow = useCallback(async () => {
     if (!user || !isFirebaseWebConfigReady) return;
@@ -468,6 +522,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       isWorkspaceLoading,
       isGuestWorkspace,
       showWelcomePage,
+      isAuthModalOpen,
       isSyncingCloud,
       lastSyncSummary,
       authError,
@@ -483,6 +538,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       logout,
       continueInLocalWorkspace,
       openWelcomeScreen,
+      handleGetStarted,
+      openAuthModal,
+      closeAuthModal,
       syncWorkspaceNow,
     }),
     [
@@ -491,6 +549,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       isWorkspaceLoading,
       isGuestWorkspace,
       showWelcomePage,
+      isAuthModalOpen,
       isSyncingCloud,
       lastSyncSummary,
       authError,
@@ -504,6 +563,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       logout,
       continueInLocalWorkspace,
       openWelcomeScreen,
+      handleGetStarted,
+      openAuthModal,
+      closeAuthModal,
       syncWorkspaceNow,
     ]
   );

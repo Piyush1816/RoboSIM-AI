@@ -31,13 +31,7 @@ import {
 } from './types/simulation';
 
 function RoboSimWorkspace() {
-  const {
-    user,
-    isAuthReady,
-    isWorkspaceLoading,
-    isGuestWorkspace,
-    showWelcomePage,
-  } = useAuth();
+  const { user, isGuestWorkspace } = useAuth();
   const [activePage, setActivePage] = useState<NavPageId>('overview');
 
   // Single Source of Truth from Centralized Experiment Store
@@ -281,24 +275,6 @@ function RoboSimWorkspace() {
     [updatePolicies]
   );
 
-  if (!isAuthReady || isWorkspaceLoading) {
-    return (
-      <div className="h-screen w-screen bg-[#070b14] text-slate-100 flex flex-col items-center justify-center gap-3">
-        <div className="w-8 h-8 rounded-full border-2 border-cyan-500/30 border-t-cyan-400 animate-spin" />
-        <div className="text-sm font-medium text-slate-200">
-          Loading isolated RoboSim AI workspace...
-        </div>
-        <div className="text-xs text-slate-400 font-mono">
-          {user?.email ? `Account: ${user.email}` : 'Verifying authentication session'}
-        </div>
-      </div>
-    );
-  }
-
-  if ((!user && !isGuestWorkspace) || showWelcomePage) {
-    return <WelcomeAuthPage />;
-  }
-
   return (
     <div className="h-screen w-screen overflow-hidden flex bg-[#070b14] text-slate-100">
       {/* Persistent Left Sidebar */}
@@ -434,12 +410,46 @@ function RoboSimWorkspace() {
   );
 }
 
+function AppRouter() {
+  const {
+    user,
+    isAuthReady,
+    isWorkspaceLoading,
+    isGuestWorkspace,
+    showWelcomePage,
+  } = useAuth();
+
+  // Always render the public Welcome page on initial load, refresh, or when unauthenticated
+  // without mounting or initializing the private dashboard workspace.
+  if (showWelcomePage || (isAuthReady && !user && !isGuestWorkspace)) {
+    return <WelcomeAuthPage />;
+  }
+
+  if (!isAuthReady || isWorkspaceLoading) {
+    return (
+      <div className="h-screen w-screen bg-[#070b14] text-slate-100 flex flex-col items-center justify-center gap-3">
+        <div className="w-8 h-8 rounded-full border-2 border-cyan-500/30 border-t-cyan-400 animate-spin" />
+        <div className="text-sm font-medium text-slate-200">
+          Loading isolated RoboSim AI workspace...
+        </div>
+        <div className="text-xs text-slate-400 font-mono">
+          {user?.email ? `Account: ${user.email}` : 'Verifying authentication session'}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ExperimentStoreProvider>
+      <RoboSimWorkspace />
+    </ExperimentStoreProvider>
+  );
+}
+
 export default function App() {
   return (
     <AuthProvider>
-      <ExperimentStoreProvider>
-        <RoboSimWorkspace />
-      </ExperimentStoreProvider>
+      <AppRouter />
     </AuthProvider>
   );
 }
